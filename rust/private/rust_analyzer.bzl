@@ -135,7 +135,7 @@ def _rust_analyzer_aspect_impl(target, ctx):
     rust_analyzer_info = write_rust_analyzer_spec_file(ctx, ctx.rule.attr, ctx.label, RustAnalyzerInfo(
         crate = crate_info,
         cfgs = cfgs,
-        env = crate_info.rustc_env,
+        env = getattr(ctx.rule.attr, "rustc_env", {}) | getattr(crate_info, "rustc_env", {}),
         deps = dep_infos,
         crate_specs = depset(transitive = [dep.crate_specs for dep in dep_infos]),
         proc_macro_dylib_path = find_proc_macro_dylib_path(toolchain, target),

@@ -23,7 +23,7 @@ load(
     "CPP_LINK_STATIC_LIBRARY_ACTION_NAME",
 )
 load("//rust/private:common.bzl", "rust_common")
-load("//rust/private:providers.bzl", "RustcOutputDiagnosticsInfo", _BuildInfo = "BuildInfo")
+load("//rust/private:providers.bzl", "RustcOutputDiagnosticsInfo", _BuildInfo = "BuildInfo", "copy_crate_info")
 load("//rust/private:stamp.bzl", "is_stamping_enabled")
 load(
     "//rust/private:utils.bzl",
@@ -1261,6 +1261,10 @@ def rustc_compile_action(
     # this is the final list of env vars
     env.update(env_from_args)
 
+    # print("Build")
+    # print("Crate Name = {}".format(crate_info.name))
+    # print("Crate Env = {}".format(env))
+
     if hasattr(attr, "version") and attr.version != "0.0.0":
         formatted_version = " v{}".format(attr.version)
     else:
@@ -1495,6 +1499,8 @@ def rustc_compile_action(
             "rustc_env": env,
         })
         crate_info = rust_common.create_crate_info(**crate_info_dict)
+    crate_info = copy_crate_info(crate_info, rustc_env = env)
+    # print("actual: {}".format(crate_info.actual))
 
     if crate_info.type in ["staticlib", "cdylib"]:
         # These rules are not supposed to be depended on by other rust targets, and
@@ -1525,6 +1531,7 @@ def rustc_compile_action(
     if output_group_info:
         providers.append(OutputGroupInfo(**output_group_info))
 
+    # print("BEFORE RETURN PROVIDERS: ", crate_info)
     return providers
 
 def _is_no_std(ctx, toolchain, crate_info):

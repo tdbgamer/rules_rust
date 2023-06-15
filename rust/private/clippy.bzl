@@ -15,7 +15,7 @@
 """A module defining clippy rules"""
 
 load("//rust/private:common.bzl", "rust_common")
-load("//rust/private:providers.bzl", "CaptureClippyOutputInfo", "ClippyInfo")
+load("//rust/private:providers.bzl", "CaptureClippyOutputInfo", "ClippyInfo", "copy_crate_info")
 load(
     "//rust/private:rustc.bzl",
     "collect_deps",
@@ -95,6 +95,8 @@ def _clippy_aspect_impl(target, ctx):
     crate_info = _get_clippy_ready_crate_info(target, ctx)
     if not crate_info:
         return [ClippyInfo(output = depset([]))]
+
+    crate_info = copy_crate_info(crate_info, rustc_env = crate_info.rustc_env_original)
 
     toolchain = find_toolchain(ctx)
     cc_toolchain, feature_configuration = find_cc_toolchain(ctx)
