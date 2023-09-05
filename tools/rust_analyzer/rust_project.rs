@@ -258,7 +258,7 @@ pub fn write_rust_project(
     // placeholders with the path to the local exec root.
     let rust_project_content = serde_json::to_string(rust_project)?
         .replace("${pwd}", execution_root)
-        .replace("__EXEC_ROOT__", execution_root)
+        .replace("__EXEC_ROOT__", output_base)
         .replace("__OUTPUT_BASE__", output_base);
 
     // Write the new rust-project.json file.
