@@ -11,11 +11,11 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 package(default_visibility = ["//visibility:public"])
 
 # licenses([
-#     "TODO",  # MIT OR Apache-2.0
+#     "TODO",  # Apache-2.0 WITH LLVM-exception
 # ])
 
 rust_library(
-    name = "syn",
+    name = "wasmparser",
     srcs = glob(["**/*.rs"]),
     compile_data = glob(
         include = ["**"],
@@ -28,21 +28,12 @@ rust_library(
             "WORKSPACE.bazel",
         ],
     ),
-    crate_features = [
-        "clone-impls",
-        "default",
-        "derive",
-        "parsing",
-        "printing",
-        "proc-macro",
-        "quote",
-    ],
     crate_root = "src/lib.rs",
-    edition = "2021",
+    edition = "2018",
     rustc_flags = ["--cap-lints=allow"],
     tags = [
         "cargo-bazel",
-        "crate-name=syn",
+        "crate-name=wasmparser",
         "manual",
         "noclippy",
         "norustfmt",
@@ -81,10 +72,5 @@ rust_library(
         "@rules_rust//rust/platform:x86_64-unknown-none": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    version = "2.0.25",
-    deps = [
-        "@rules_rust_wasm_bindgen__proc-macro2-1.0.64//:proc_macro2",
-        "@rules_rust_wasm_bindgen__quote-1.0.29//:quote",
-        "@rules_rust_wasm_bindgen__unicode-ident-1.0.10//:unicode_ident",
-    ],
+    version = "0.59.0",
 )

@@ -11,11 +11,11 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 package(default_visibility = ["//visibility:public"])
 
 # licenses([
-#     "TODO",  # MIT/Apache-2.0
+#     "TODO",  # Apache-2.0 WITH LLVM-exception
 # ])
 
 rust_library(
-    name = "wasm_bindgen_wasm_conventions",
+    name = "wit_schema_version",
     srcs = glob(["**/*.rs"]),
     compile_data = glob(
         include = ["**"],
@@ -33,7 +33,7 @@ rust_library(
     rustc_flags = ["--cap-lints=allow"],
     tags = [
         "cargo-bazel",
-        "crate-name=wasm-bindgen-wasm-conventions",
+        "crate-name=wit-schema-version",
         "manual",
         "noclippy",
         "norustfmt",
@@ -72,9 +72,5 @@ rust_library(
         "@rules_rust//rust/platform:x86_64-unknown-none": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    version = "0.2.87",
-    deps = [
-        "@rules_rust_wasm_bindgen__anyhow-1.0.71//:anyhow",
-        "@rules_rust_wasm_bindgen__walrus-0.19.0//:walrus",
-    ],
+    version = "0.1.0",
 )

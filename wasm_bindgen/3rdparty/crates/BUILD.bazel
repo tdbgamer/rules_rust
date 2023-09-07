@@ -117,30 +117,48 @@ alias(
 
 alias(
     name = "wasm-bindgen",
-    actual = "@rules_rust_wasm_bindgen__wasm-bindgen-0.2.87//:wasm_bindgen",
+    actual = "@rules_rust_wasm_bindgen__wasm-bindgen-0.2.84//:wasm_bindgen",
     tags = ["manual"],
 )
 
 alias(
     name = "wasm-bindgen-cli-support",
-    actual = "@rules_rust_wasm_bindgen__wasm-bindgen-cli-support-0.2.87//:wasm_bindgen_cli_support",
+    actual = "@rules_rust_wasm_bindgen__wasm-bindgen-cli-support-0.2.84//:wasm_bindgen_cli_support",
     tags = ["manual"],
 )
 
 alias(
     name = "wasm-bindgen-shared",
-    actual = "@rules_rust_wasm_bindgen__wasm-bindgen-shared-0.2.87//:wasm_bindgen_shared",
-    tags = ["manual"],
-)
-
-alias(
-    name = "wasmparser",
-    actual = "@rules_rust_wasm_bindgen__wasmparser-0.102.0//:wasmparser",
+    actual = "@rules_rust_wasm_bindgen__wasm-bindgen-shared-0.2.84//:wasm_bindgen_shared",
     tags = ["manual"],
 )
 
 alias(
     name = "wasmprinter",
-    actual = "@rules_rust_wasm_bindgen__wasmprinter-0.2.60//:wasmprinter",
+    actual = "@rules_rust_wasm_bindgen__wasmprinter-0.2.33//:wasmprinter",
+    tags = ["manual"],
+)
+
+alias(
+    name = "wit-printer",
+    actual = "@rules_rust_wasm_bindgen__wit-printer-0.2.0//:wit_printer",
+    tags = ["manual"],
+)
+
+alias(
+    name = "wit-text",
+    actual = "@rules_rust_wasm_bindgen__wit-text-0.8.0//:wit_text",
+    tags = ["manual"],
+)
+
+alias(
+    name = "wit-validator",
+    actual = "@rules_rust_wasm_bindgen__wit-validator-0.2.1//:wit_validator",
+    tags = ["manual"],
+)
+
+alias(
+    name = "wit-walrus",
+    actual = "@rules_rust_wasm_bindgen__wit-walrus-0.6.0//:wit_walrus",
     tags = ["manual"],
 )

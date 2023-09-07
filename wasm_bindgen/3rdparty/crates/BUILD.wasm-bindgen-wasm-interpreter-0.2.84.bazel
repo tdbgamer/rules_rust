@@ -72,11 +72,11 @@ rust_library(
         "@rules_rust//rust/platform:x86_64-unknown-none": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    version = "0.2.87",
+    version = "0.2.84",
     deps = [
         "@rules_rust_wasm_bindgen__anyhow-1.0.71//:anyhow",
         "@rules_rust_wasm_bindgen__log-0.4.19//:log",
         "@rules_rust_wasm_bindgen__walrus-0.19.0//:walrus",
-        "@rules_rust_wasm_bindgen__wasm-bindgen-wasm-conventions-0.2.87//:wasm_bindgen_wasm_conventions",
+        "@rules_rust_wasm_bindgen__wasm-bindgen-wasm-conventions-0.2.84//:wasm_bindgen_wasm_conventions",
     ],
 )
