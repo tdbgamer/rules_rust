@@ -126,6 +126,7 @@ def _clippy_aspect_impl(target, ctx):
         build_env_files = build_env_files,
         build_flags_files = build_flags_files,
         emit = ["dep-info", "metadata"],
+        skip_expanding_rustc_env = True,
     )
 
     if crate_info.is_test:
@@ -140,12 +141,11 @@ def _clippy_aspect_impl(target, ctx):
         args.process_wrapper_flags.add("--stderr-file", clippy_out)
 
         if clippy_flags:
-            fail("""Combining @rules_rust//:clippy_flags with @rules_rust//:capture_clippy_output=true is currently not supported.
-See https://github.com/bazelbuild/rules_rust/pull/1264#discussion_r853241339 for more detail.""")
+            args.rustc_flags.add_all(clippy_flags)
 
         # If we are capturing the output, we want the build system to be able to keep going
-        # and consume the output. Some clippy lints are denials, so we treat them as warnings.
-        args.rustc_flags.add("-Wclippy::all")
+        # and consume the output. Some clippy lints are denials, so we cap everything at warn.
+        args.rustc_flags.add("--cap-lints=warn")
     else:
         # A marker file indicating clippy has executed successfully.
         # This file is necessary because "ctx.actions.run" mandates an output.
@@ -178,6 +178,7 @@ See https://github.com/bazelbuild/rules_rust/pull/1264#discussion_r853241339 for
         tools = [toolchain.clippy_driver],
         arguments = args.all,
         mnemonic = "Clippy",
+        toolchain = "@rules_rust//rust:toolchain_type",
     )
 
     return [
@@ -191,7 +192,6 @@ See https://github.com/bazelbuild/rules_rust/pull/1264#discussion_r853241339 for
 #               //...
 rust_clippy_aspect = aspect(
     fragments = ["cpp"],
-    host_fragments = ["cpp"],
     attrs = {
         "_capture_output": attr.label(
             doc = "Value of the `capture_clippy_output` build setting",
@@ -239,7 +239,6 @@ rust_clippy_aspect = aspect(
         str(Label("//rust:toolchain_type")),
         "@bazel_tools//tools/cpp:toolchain_type",
     ],
-    incompatible_use_toolchain_transition = True,
     implementation = _clippy_aspect_impl,
     doc = """\
 Executes the clippy checker on specified targets.

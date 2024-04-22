@@ -5,56 +5,53 @@ use cfg_expr::targets::{get_builtin_target_by_triple, TargetInfo};
 use cfg_expr::{Expression, Predicate};
 
 use crate::context::CrateContext;
-use crate::utils::starlark::Select;
+use crate::utils::target_triple::TargetTriple;
 
 /// Walk through all dependencies in a [CrateContext] list for all configuration specific
-/// dependencies to produce a mapping of configuration to compatible platform triples.
-/// Also adds mappings for all known platform triples.
-pub fn resolve_cfg_platforms(
+/// dependencies to produce a mapping of configurations/Cargo target_triples to compatible
+/// Bazel target_triples.  Also adds mappings for all known target_triples.
+pub(crate) fn resolve_cfg_platforms(
     crates: Vec<&CrateContext>,
-    supported_platform_triples: &BTreeSet<String>,
-) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    supported_platform_triples: &BTreeSet<TargetTriple>,
+) -> Result<BTreeMap<String, BTreeSet<TargetTriple>>> {
     // Collect all unique configurations from all dependencies into a single set
     let configurations: BTreeSet<String> = crates
         .iter()
         .flat_map(|ctx| {
             let attr = &ctx.common_attrs;
-            attr.deps
-                .configurations()
-                .into_iter()
-                .chain(attr.deps_dev.configurations())
-                .chain(attr.proc_macro_deps.configurations())
-                .chain(attr.proc_macro_deps_dev.configurations())
-                // Chain the build dependencies if some are defined
-                .chain(if let Some(attr) = &ctx.build_script_attrs {
-                    attr.deps
-                        .configurations()
-                        .into_iter()
-                        .chain(attr.proc_macro_deps.configurations())
-                        .collect::<BTreeSet<Option<&String>>>()
-                        .into_iter()
-                } else {
-                    BTreeSet::new().into_iter()
-                })
-                .flatten()
+            let mut configurations = BTreeSet::new();
+
+            configurations.extend(attr.deps.configurations());
+            configurations.extend(attr.deps_dev.configurations());
+            configurations.extend(attr.proc_macro_deps.configurations());
+            configurations.extend(attr.proc_macro_deps_dev.configurations());
+
+            // Chain the build dependencies if some are defined
+            if let Some(attr) = &ctx.build_script_attrs {
+                configurations.extend(attr.deps.configurations());
+                configurations.extend(attr.proc_macro_deps.configurations());
+            }
+
+            configurations
         })
-        .cloned()
         .collect();
 
     // Generate target information for each triple string
     let target_infos = supported_platform_triples
         .iter()
-        .map(|t| match get_builtin_target_by_triple(t) {
-            Some(info) => Ok(info),
-            None => Err(anyhow!(
-                "Invalid platform triple in supported platforms: {}",
-                t
-            )),
-        })
-        .collect::<Result<Vec<&'static TargetInfo>>>()?;
+        .map(
+            |target_triple| match get_builtin_target_by_triple(&target_triple.to_cargo()) {
+                Some(info) => Ok((target_triple, info)),
+                None => Err(anyhow!(
+                    "Invalid platform triple in supported platforms: {}",
+                    target_triple
+                )),
+            },
+        )
+        .collect::<Result<BTreeMap<&TargetTriple, &'static TargetInfo>>>()?;
 
     // `cfg-expr` does not understand configurations that are simply platform triples
-    // (`x86_64-unknown-linux-gun` vs `cfg(target = "x86_64-unkonwn-linux-gnu")`). So
+    // (`x86_64-unknown-linux-gnu` vs `cfg(target = "x86_64-unkonwn-linux-gnu")`). So
     // in order to parse configurations, the text is renamed for the check but the
     // original is retained for comaptibility with the manifest.
     let rename = |cfg: &str| -> String { format!("cfg(target = \"{cfg}\")") };
@@ -64,12 +61,12 @@ pub fn resolve_cfg_platforms(
         .map(|cfg| (rename(cfg), cfg.clone()))
         .collect();
 
-    configurations
+    let mut conditions = configurations
         .into_iter()
         // `cfg-expr` requires that the expressions be actual `cfg` expressions. Any time
         // there's a target triple (which is a valid constraint), convert it to a cfg expression.
         .map(|cfg| match cfg.starts_with("cfg(") {
-            true => cfg.to_string(),
+            true => cfg,
             false => rename(&cfg),
         })
         // Check the current configuration with against each supported triple
@@ -79,17 +76,17 @@ pub fn resolve_cfg_platforms(
 
             let triples = target_infos
                 .iter()
-                .filter(|info| {
+                .filter(|(_, target_info)| {
                     expression.eval(|p| match p {
-                        Predicate::Target(tp) => tp.matches(**info),
+                        Predicate::Target(tp) => tp.matches(**target_info),
                         Predicate::KeyValue { key, val } => {
-                            *key == "target" && val == &info.triple.as_str()
+                            *key == "target" && val == &target_info.triple.as_str()
                         }
                         // For now there is no other kind of matching
                         _ => false,
                     })
                 })
-                .map(|info| info.triple.to_string())
+                .map(|(triple, _)| (*triple).clone())
                 .collect();
 
             // Map any renamed configurations back to their original IDs
@@ -100,11 +97,15 @@ pub fn resolve_cfg_platforms(
 
             Ok((cfg, triples))
         })
-        .chain(supported_platform_triples.iter().filter_map(|triple| {
-            let target = get_builtin_target_by_triple(triple);
-            target.map(|target| Ok((triple.clone(), [target.triple.to_string()].into())))
-        }))
-        .collect()
+        .collect::<Result<BTreeMap<String, BTreeSet<TargetTriple>>>>()?;
+    // Insert identity relationships.
+    for target_triple in supported_platform_triples.iter() {
+        conditions
+            .entry(target_triple.to_bazel())
+            .or_default()
+            .insert(target_triple.clone());
+    }
+    Ok(conditions)
 }
 
 #[cfg(test)]
@@ -112,24 +113,26 @@ mod test {
     use crate::config::CrateId;
     use crate::context::crate_context::CrateDependency;
     use crate::context::CommonAttributes;
-    use crate::utils::starlark::SelectList;
+    use crate::select::Select;
 
     use super::*;
 
-    fn supported_platform_triples() -> BTreeSet<String> {
+    const VERSION_ZERO_ONE_ZERO: semver::Version = semver::Version::new(0, 1, 0);
+
+    fn supported_platform_triples() -> BTreeSet<TargetTriple> {
         BTreeSet::from([
-            "aarch64-apple-darwin".to_owned(),
-            "i686-apple-darwin".to_owned(),
-            "x86_64-unknown-linux-gnu".to_owned(),
+            TargetTriple::from_bazel("aarch64-apple-darwin".to_owned()),
+            TargetTriple::from_bazel("i686-apple-darwin".to_owned()),
+            TargetTriple::from_bazel("x86_64-unknown-linux-gnu".to_owned()),
         ])
     }
 
     #[test]
     fn resolve_no_targeted() {
-        let mut deps = SelectList::default();
+        let mut deps: Select<BTreeSet<CrateDependency>> = Select::default();
         deps.insert(
             CrateDependency {
-                id: CrateId::new("mock_crate_b".to_owned(), "0.1.0".to_owned()),
+                id: CrateId::new("mock_crate_b".to_owned(), VERSION_ZERO_ONE_ZERO),
                 target: "mock_crate_b".to_owned(),
                 alias: None,
             },
@@ -138,12 +141,23 @@ mod test {
 
         let context = CrateContext {
             name: "mock_crate_a".to_owned(),
-            version: "0.1.0".to_owned(),
+            version: VERSION_ZERO_ONE_ZERO,
+            package_url: None,
+            repository: None,
+            targets: BTreeSet::default(),
+            library_target_name: None,
             common_attrs: CommonAttributes {
                 deps,
                 ..CommonAttributes::default()
             },
-            ..CrateContext::default()
+            build_script_attrs: None,
+            license: None,
+            license_ids: BTreeSet::default(),
+            license_file: None,
+            additive_build_file_content: None,
+            disable_pipelining: false,
+            extra_aliased_targets: BTreeMap::default(),
+            alias_rule: None,
         };
 
         let configurations =
@@ -155,25 +169,27 @@ mod test {
                 // All known triples.
                 (
                     "aarch64-apple-darwin".to_owned(),
-                    BTreeSet::from(["aarch64-apple-darwin".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel("aarch64-apple-darwin".to_owned())]),
                 ),
                 (
                     "i686-apple-darwin".to_owned(),
-                    BTreeSet::from(["i686-apple-darwin".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel("i686-apple-darwin".to_owned())]),
                 ),
                 (
                     "x86_64-unknown-linux-gnu".to_owned(),
-                    BTreeSet::from(["x86_64-unknown-linux-gnu".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel(
+                        "x86_64-unknown-linux-gnu".to_owned()
+                    )]),
                 ),
             ])
         )
     }
 
     fn mock_resolve_context(configuration: String) -> CrateContext {
-        let mut deps = SelectList::default();
+        let mut deps: Select<BTreeSet<CrateDependency>> = Select::default();
         deps.insert(
             CrateDependency {
-                id: CrateId::new("mock_crate_b".to_owned(), "0.1.0".to_owned()),
+                id: CrateId::new("mock_crate_b".to_owned(), VERSION_ZERO_ONE_ZERO),
                 target: "mock_crate_b".to_owned(),
                 alias: None,
             },
@@ -182,12 +198,23 @@ mod test {
 
         CrateContext {
             name: "mock_crate_a".to_owned(),
-            version: "0.1.0".to_owned(),
+            version: VERSION_ZERO_ONE_ZERO,
+            package_url: None,
+            repository: None,
+            targets: BTreeSet::default(),
+            library_target_name: None,
             common_attrs: CommonAttributes {
                 deps,
                 ..CommonAttributes::default()
             },
-            ..CrateContext::default()
+            build_script_attrs: None,
+            license: None,
+            license_ids: BTreeSet::default(),
+            license_file: None,
+            additive_build_file_content: None,
+            disable_pipelining: false,
+            extra_aliased_targets: BTreeMap::default(),
+            alias_rule: None,
         }
     }
 
@@ -196,13 +223,15 @@ mod test {
         let data = BTreeMap::from([
             (
                 r#"cfg(target = "x86_64-unknown-linux-gnu")"#.to_owned(),
-                BTreeSet::from(["x86_64-unknown-linux-gnu".to_owned()]),
+                BTreeSet::from([TargetTriple::from_bazel(
+                    "x86_64-unknown-linux-gnu".to_owned(),
+                )]),
             ),
             (
                 r#"cfg(any(target_os = "macos", target_os = "ios"))"#.to_owned(),
                 BTreeSet::from([
-                    "aarch64-apple-darwin".to_owned(),
-                    "i686-apple-darwin".to_owned(),
+                    TargetTriple::from_bazel("aarch64-apple-darwin".to_owned()),
+                    TargetTriple::from_bazel("i686-apple-darwin".to_owned()),
                 ]),
             ),
         ]);
@@ -220,15 +249,19 @@ mod test {
                     // All known triples.
                     (
                         "aarch64-apple-darwin".to_owned(),
-                        BTreeSet::from(["aarch64-apple-darwin".to_owned()]),
+                        BTreeSet::from([TargetTriple::from_bazel(
+                            "aarch64-apple-darwin".to_owned()
+                        )]),
                     ),
                     (
                         "i686-apple-darwin".to_owned(),
-                        BTreeSet::from(["i686-apple-darwin".to_owned()]),
+                        BTreeSet::from([TargetTriple::from_bazel("i686-apple-darwin".to_owned())]),
                     ),
                     (
                         "x86_64-unknown-linux-gnu".to_owned(),
-                        BTreeSet::from(["x86_64-unknown-linux-gnu".to_owned()]),
+                        BTreeSet::from([TargetTriple::from_bazel(
+                            "x86_64-unknown-linux-gnu".to_owned()
+                        )]),
                     ),
                 ])
             );
@@ -238,10 +271,10 @@ mod test {
     #[test]
     fn resolve_platforms() {
         let configuration = r#"x86_64-unknown-linux-gnu"#.to_owned();
-        let mut deps = SelectList::default();
+        let mut deps: Select<BTreeSet<CrateDependency>> = Select::default();
         deps.insert(
             CrateDependency {
-                id: CrateId::new("mock_crate_b".to_owned(), "0.1.0".to_owned()),
+                id: CrateId::new("mock_crate_b".to_owned(), VERSION_ZERO_ONE_ZERO),
                 target: "mock_crate_b".to_owned(),
                 alias: None,
             },
@@ -250,12 +283,23 @@ mod test {
 
         let context = CrateContext {
             name: "mock_crate_a".to_owned(),
-            version: "0.1.0".to_owned(),
+            version: VERSION_ZERO_ONE_ZERO,
+            package_url: None,
+            repository: None,
+            targets: BTreeSet::default(),
+            library_target_name: None,
             common_attrs: CommonAttributes {
                 deps,
                 ..CommonAttributes::default()
             },
-            ..CrateContext::default()
+            build_script_attrs: None,
+            license: None,
+            license_ids: BTreeSet::default(),
+            license_file: None,
+            additive_build_file_content: None,
+            disable_pipelining: false,
+            extra_aliased_targets: BTreeMap::default(),
+            alias_rule: None,
         };
 
         let configurations =
@@ -266,20 +310,24 @@ mod test {
             BTreeMap::from([
                 (
                     configuration,
-                    BTreeSet::from(["x86_64-unknown-linux-gnu".to_owned()])
+                    BTreeSet::from([TargetTriple::from_bazel(
+                        "x86_64-unknown-linux-gnu".to_owned()
+                    )])
                 ),
                 // All known triples.
                 (
                     "aarch64-apple-darwin".to_owned(),
-                    BTreeSet::from(["aarch64-apple-darwin".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel("aarch64-apple-darwin".to_owned())]),
                 ),
                 (
                     "i686-apple-darwin".to_owned(),
-                    BTreeSet::from(["i686-apple-darwin".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel("i686-apple-darwin".to_owned())]),
                 ),
                 (
                     "x86_64-unknown-linux-gnu".to_owned(),
-                    BTreeSet::from(["x86_64-unknown-linux-gnu".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel(
+                        "x86_64-unknown-linux-gnu".to_owned()
+                    )]),
                 ),
             ])
         );
@@ -288,10 +336,10 @@ mod test {
     #[test]
     fn resolve_unsupported_targeted() {
         let configuration = r#"cfg(target = "x86_64-unknown-unknown")"#.to_owned();
-        let mut deps = SelectList::default();
+        let mut deps: Select<BTreeSet<CrateDependency>> = Select::default();
         deps.insert(
             CrateDependency {
-                id: CrateId::new("mock_crate_b".to_owned(), "0.1.0".to_owned()),
+                id: CrateId::new("mock_crate_b".to_owned(), VERSION_ZERO_ONE_ZERO),
                 target: "mock_crate_b".to_owned(),
                 alias: None,
             },
@@ -300,12 +348,23 @@ mod test {
 
         let context = CrateContext {
             name: "mock_crate_a".to_owned(),
-            version: "0.1.0".to_owned(),
+            version: VERSION_ZERO_ONE_ZERO,
+            package_url: None,
+            repository: None,
+            targets: BTreeSet::default(),
+            library_target_name: None,
             common_attrs: CommonAttributes {
                 deps,
                 ..CommonAttributes::default()
             },
-            ..CrateContext::default()
+            build_script_attrs: None,
+            license: None,
+            license_ids: BTreeSet::default(),
+            license_file: None,
+            additive_build_file_content: None,
+            disable_pipelining: false,
+            extra_aliased_targets: BTreeMap::default(),
+            alias_rule: None,
         };
 
         let configurations =
@@ -318,15 +377,17 @@ mod test {
                 // All known triples.
                 (
                     "aarch64-apple-darwin".to_owned(),
-                    BTreeSet::from(["aarch64-apple-darwin".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel("aarch64-apple-darwin".to_owned())]),
                 ),
                 (
                     "i686-apple-darwin".to_owned(),
-                    BTreeSet::from(["i686-apple-darwin".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel("i686-apple-darwin".to_owned())]),
                 ),
                 (
                     "x86_64-unknown-linux-gnu".to_owned(),
-                    BTreeSet::from(["x86_64-unknown-linux-gnu".to_owned()]),
+                    BTreeSet::from([TargetTriple::from_bazel(
+                        "x86_64-unknown-linux-gnu".to_owned()
+                    )]),
                 ),
             ])
         );

@@ -23,7 +23,7 @@ load(
     "CPP_LINK_STATIC_LIBRARY_ACTION_NAME",
 )
 load("//rust/private:common.bzl", "rust_common")
-load("//rust/private:providers.bzl", _BuildInfo = "BuildInfo")
+load("//rust/private:providers.bzl", "RustcOutputDiagnosticsInfo", _BuildInfo = "BuildInfo")
 load("//rust/private:stamp.bzl", "is_stamping_enabled")
 load(
     "//rust/private:utils.bzl",
@@ -38,6 +38,7 @@ load(
     "make_static_lib_symlink",
     "relativize",
 )
+load(":utils.bzl", "is_std_dylib")
 
 BuildInfo = _BuildInfo
 
@@ -310,17 +311,19 @@ def collect_deps(
                 transitive_link_search_paths.append(dep_info.link_search_path_files)
 
             transitive_build_infos.append(dep_info.transitive_build_infos)
+        elif cc_info or dep_build_info:
+            if cc_info:
+                # This dependency is a cc_library
+                transitive_noncrates.append(cc_info.linking_context.linker_inputs)
 
-        elif cc_info:
-            # This dependency is a cc_library
-            transitive_noncrates.append(cc_info.linking_context.linker_inputs)
-        elif dep_build_info:
-            if build_info:
-                fail("Several deps are providing build information, " +
-                     "only one is allowed in the dependencies")
-            build_info = dep_build_info
-            transitive_build_infos.append(depset([build_info]))
-            transitive_link_search_paths.append(depset([build_info.link_search_paths]))
+            if dep_build_info:
+                if build_info:
+                    fail("Several deps are providing build information, " +
+                         "only one is allowed in the dependencies")
+                build_info = dep_build_info
+                transitive_build_infos.append(depset([build_info]))
+                if build_info.link_search_paths:
+                    transitive_link_search_paths.append(depset([build_info.link_search_paths]))
         else:
             fail("rust targets can only depend on rust_library, rust_*_library or cc_library " +
                  "targets.")
@@ -389,7 +392,7 @@ def get_cc_user_link_flags(ctx):
     """
     return ctx.fragments.cpp.linkopts
 
-def get_linker_and_args(ctx, attr, crate_type, cc_toolchain, feature_configuration, rpaths, rustdoc = False):
+def get_linker_and_args(ctx, attr, crate_type, cc_toolchain, feature_configuration, rpaths, add_flags_for_binary = False):
     """Gathers cc_common linker information
 
     Args:
@@ -399,7 +402,7 @@ def get_linker_and_args(ctx, attr, crate_type, cc_toolchain, feature_configurati
         cc_toolchain (CcToolchain): cc_toolchain for which we are creating build variables.
         feature_configuration (FeatureConfiguration): Feature configuration to be queried.
         rpaths (depset): Depset of directories where loader will look for libraries at runtime.
-        rustdoc (bool, optional): Whether to add "bin" link flags to the command regardless of `crate_type`.
+        add_flags_for_binary (bool, optional): Whether to add "bin" link flags to the command regardless of `crate_type`.
 
 
     Returns:
@@ -410,7 +413,7 @@ def get_linker_and_args(ctx, attr, crate_type, cc_toolchain, feature_configurati
     """
     user_link_flags = get_cc_user_link_flags(ctx)
 
-    if crate_type in ("bin") or rustdoc:
+    if crate_type in ("bin") or add_flags_for_binary:
         is_linking_dynamic_library = False
         action_name = CPP_LINK_EXECUTABLE_ACTION_NAME
     elif crate_type in ("dylib"):
@@ -428,7 +431,7 @@ def get_linker_and_args(ctx, attr, crate_type, cc_toolchain, feature_configurati
     else:
         fail("Unknown `crate_type`: {}".format(crate_type))
 
-    # Add linkopt's from dependencies. This includes linkopts from transitive
+    # Add linkopts from dependencies. This includes linkopts from transitive
     # dependencies since they get merged up.
     for dep in getattr(attr, "deps", []):
         if CcInfo in dep and dep[CcInfo].linking_context:
@@ -462,13 +465,15 @@ def get_linker_and_args(ctx, attr, crate_type, cc_toolchain, feature_configurati
 def _process_build_scripts(
         build_info,
         dep_info,
-        compile_inputs):
+        compile_inputs,
+        include_link_flags = True):
     """Gathers the outputs from a target's `cargo_build_script` action.
 
     Args:
         build_info (BuildInfo): The target Build's dependency info.
         dep_info (DepInfo): The Depinfo provider form the target Crate's set of inputs.
         compile_inputs (depset): A set of all files that will participate in the build.
+        include_link_flags (bool, optional): Whether to include flags like `-l` that instruct the linker to search for a library.
 
     Returns:
         tuple: A tuple: A tuple of the following items:
@@ -477,7 +482,7 @@ def _process_build_scripts(
             - (File): An optional path to a generated environment file from a `cargo_build_script` target
             - (depset[File]): All direct and transitive build flags from the current build info.
     """
-    extra_inputs, out_dir, build_env_file, build_flags_files = _create_extra_input_args(build_info, dep_info)
+    extra_inputs, out_dir, build_env_file, build_flags_files = _create_extra_input_args(build_info, dep_info, include_link_flags = include_link_flags)
     compile_inputs = depset(transitive = [extra_inputs, compile_inputs])
     return compile_inputs, out_dir, build_env_file, build_flags_files
 
@@ -638,7 +643,8 @@ def collect_inputs(
         build_info,
         stamp = False,
         force_depend_on_objects = False,
-        experimental_use_cc_common_link = False):
+        experimental_use_cc_common_link = False,
+        include_link_flags = True):
     """Gather's the inputs and required input information for a rustc action
 
     Args:
@@ -657,7 +663,8 @@ def collect_inputs(
         force_depend_on_objects (bool, optional): Forces dependencies of this rule to be objects rather than
             metadata, even for libraries. This is used in rustdoc tests.
         experimental_use_cc_common_link (bool, optional): Whether rules_rust uses cc_common.link to link
-	    rust binaries.
+            rust binaries.
+        include_link_flags (bool, optional): Whether to include flags like `-l` that instruct the linker to search for a library.
 
     Returns:
         tuple: A tuple: A tuple of the following items:
@@ -670,7 +677,15 @@ def collect_inputs(
     """
     linker_script = getattr(file, "linker_script") if hasattr(file, "linker_script") else None
 
-    linker_depset = cc_toolchain.all_files
+    # TODO: As of writing this comment Bazel used Java CcToolchainInfo.
+    # However there is ongoing work to rewrite provider in Starlark.
+    # rules_rust is not coupled with Bazel release. Remove conditional and change to
+    # _linker_files once Starlark CcToolchainInfo is visible to Bazel.
+    # https://github.com/bazelbuild/rules_rust/issues/2425
+    if hasattr(cc_toolchain, "_linker_files"):
+        linker_depset = cc_toolchain._linker_files
+    else:
+        linker_depset = cc_toolchain.linker_files()
     compilation_mode = ctx.var["COMPILATION_MODE"]
 
     use_pic = _should_use_pic(cc_toolchain, feature_configuration, crate_info.type, compilation_mode)
@@ -698,9 +713,16 @@ def collect_inputs(
     if _depend_on_metadata(crate_info, force_depend_on_objects):
         transitive_crate_outputs = dep_info.transitive_metadata_outputs
 
+    build_info_inputs = []
+    if build_info:
+        if build_info.rustc_env:
+            build_info_inputs.append(build_info.rustc_env)
+        if build_info.flags:
+            build_info_inputs.append(build_info.flags)
+
     nolinkstamp_compile_inputs = depset(
         getattr(files, "data", []) +
-        ([build_info.rustc_env, build_info.flags] if build_info else []) +
+        build_info_inputs +
         ([toolchain.target_json] if toolchain.target_json else []) +
         ([] if linker_script == None else [linker_script]),
         transitive = [
@@ -756,11 +778,10 @@ def collect_inputs(
     # For backwards compatibility, we also check the value of the `rustc_env_files` attribute when
     # `crate_info.rustc_env_files` is not populated.
     build_env_files = crate_info.rustc_env_files if crate_info.rustc_env_files else getattr(files, "rustc_env_files", [])
-    compile_inputs, out_dir, build_env_file, build_flags_files = _process_build_scripts(build_info, dep_info, compile_inputs)
+    compile_inputs, out_dir, build_env_file, build_flags_files = _process_build_scripts(build_info, dep_info, compile_inputs, include_link_flags = include_link_flags)
     if build_env_file:
         build_env_files = [f for f in build_env_files] + [build_env_file]
     compile_inputs = depset(build_env_files, transitive = [compile_inputs])
-
     return compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs
 
 def construct_arguments(
@@ -782,12 +803,14 @@ def construct_arguments(
         build_flags_files,
         emit = ["dep-info", "link"],
         force_all_deps_direct = False,
-        rustdoc = False,
+        add_flags_for_binary = False,
+        include_link_flags = True,
         stamp = False,
         remap_path_prefix = "",
         use_json_output = False,
         build_metadata = False,
-        force_depend_on_objects = False):
+        force_depend_on_objects = False,
+        skip_expanding_rustc_env = False):
     """Builds an Args object containing common rustc flags
 
     Args:
@@ -810,13 +833,15 @@ def construct_arguments(
         emit (list): Values for the --emit flag to rustc.
         force_all_deps_direct (bool, optional): Whether to pass the transitive rlibs with --extern
             to the commandline as opposed to -L.
-        rustdoc (bool, optional): Whether to add "bin" link flags to the command regardless of `emit` and `crate_type`.
+        add_flags_for_binary (bool, optional): Whether to add "bin" link flags to the command regardless of `emit` and `crate_type`.
+        include_link_flags (bool, optional): Whether to include flags like `-l` that instruct the linker to search for a library.
         stamp (bool, optional): Whether or not workspace status stamping is enabled. For more details see
             https://docs.bazel.build/versions/main/user-manual.html#flag--stamp
         remap_path_prefix (str, optional): A value used to remap `${pwd}` to. If set to None, no prefix will be set.
         use_json_output (bool): Have rustc emit json and process_wrapper parse json messages to output rendered output.
         build_metadata (bool): Generate CLI arguments for building *only* .rmeta files. This requires use_json_output.
         force_depend_on_objects (bool): Force using `.rlib` object files instead of metadata (`.rmeta`) files even if they are available.
+        skip_expanding_rustc_env (bool): Whether to skip expanding CrateInfo.rustc_env_attr
 
     Returns:
         tuple: A tuple of the following items
@@ -871,23 +896,6 @@ def construct_arguments(
     if out_dir != None:
         env["OUT_DIR"] = "${pwd}/" + out_dir
 
-    # Handle that the binary name and crate name may be different.
-    #
-    # If a target name contains a - then cargo (and rules_rust) will generate a
-    # crate name with _ instead.  Accordingly, rustc will generate a output
-    # file (executable, or rlib, or whatever) with _ not -.  But when cargo
-    # puts a binary in the target/${config} directory, and sets environment
-    # variables like `CARGO_BIN_EXE_${binary_name}` it will use the - version
-    # not the _ version.  So we rename the rustc-generated file (with _s) to
-    # have -s if needed.
-    emit_with_paths = emit
-    if crate_info.type == "bin" and crate_info.output != None:
-        generated_file = crate_info.name + toolchain.binary_ext
-        src = "/".join([crate_info.output.dirname, generated_file])
-        dst = crate_info.output.path
-        if src != dst:
-            emit_with_paths = [("link=" + dst if val == "link" else val) for val in emit]
-
     # Arguments for launching rustc from the process wrapper
     rustc_path = ctx.actions.args()
     rustc_path.add("--")
@@ -927,6 +935,10 @@ def construct_arguments(
     if build_metadata:
         # Configure process_wrapper to terminate rustc when metadata are emitted
         process_wrapper_flags.add("--rustc-quit-on-rmeta", "true")
+        if crate_info.rustc_rmeta_output:
+            process_wrapper_flags.add("--output-file", crate_info.rustc_rmeta_output.path)
+    elif crate_info.rustc_output:
+        process_wrapper_flags.add("--output-file", crate_info.rustc_output.path)
 
     rustc_flags.add(error_format, format = "--error-format=%s")
 
@@ -947,13 +959,21 @@ def construct_arguments(
     compilation_mode = get_compilation_mode_opts(ctx, toolchain)
     rustc_flags.add(compilation_mode.opt_level, format = "--codegen=opt-level=%s")
     rustc_flags.add(compilation_mode.debug_info, format = "--codegen=debuginfo=%s")
+    rustc_flags.add(compilation_mode.strip_level, format = "--codegen=strip=%s")
 
     # For determinism to help with build distribution and such
     if remap_path_prefix != None:
         rustc_flags.add("--remap-path-prefix=${{pwd}}={}".format(remap_path_prefix))
 
-    if emit:
-        rustc_flags.add_joined(emit_with_paths, format_joined = "--emit=%s", join_with = ",")
+    emit_without_paths = []
+    for kind in emit:
+        if kind == "link" and crate_info.type == "bin" and crate_info.output != None:
+            rustc_flags.add(crate_info.output, format = "--emit=link=%s")
+        else:
+            emit_without_paths.append(kind)
+
+    if emit_without_paths:
+        rustc_flags.add_joined(emit_without_paths, format_joined = "--emit=%s", join_with = ",")
     if error_format != "json":
         # Color is not compatible with json output.
         rustc_flags.add("--color=always")
@@ -981,7 +1001,7 @@ def construct_arguments(
     add_edition_flags(rustc_flags, crate_info)
 
     # Link!
-    if ("link" in emit and crate_info.type not in ["rlib", "lib"]) or rustdoc:
+    if ("link" in emit and crate_info.type not in ["rlib", "lib"]) or add_flags_for_binary:
         # Rust's built-in linker can handle linking wasm files. We don't want to attempt to use the cc
         # linker since it won't understand.
         compilation_mode = ctx.var["COMPILATION_MODE"]
@@ -992,13 +1012,16 @@ def construct_arguments(
             else:
                 rpaths = depset()
 
-            ld, link_args, link_env = get_linker_and_args(ctx, attr, crate_info.type, cc_toolchain, feature_configuration, rpaths, rustdoc)
+            ld, link_args, link_env = get_linker_and_args(ctx, attr, crate_info.type, cc_toolchain, feature_configuration, rpaths, add_flags_for_binary = add_flags_for_binary)
 
             env.update(link_env)
             rustc_flags.add(ld, format = "--codegen=linker=%s")
-            rustc_flags.add_joined("--codegen", link_args, join_with = " ", format_joined = "link-args=%s")
 
-        _add_native_link_flags(rustc_flags, dep_info, linkstamp_outs, ambiguous_libs, crate_info.type, toolchain, cc_toolchain, feature_configuration, compilation_mode)
+            # Split link args into individual "--codegen=link-arg=" flags to handle nested spaces.
+            # Additional context: https://github.com/rust-lang/rust/pull/36574
+            rustc_flags.add_all(link_args, format_each = "--codegen=link-arg=%s")
+
+        _add_native_link_flags(rustc_flags, dep_info, linkstamp_outs, ambiguous_libs, crate_info.type, toolchain, cc_toolchain, feature_configuration, compilation_mode, include_link_flags = include_link_flags)
 
     use_metadata = _depend_on_metadata(crate_info, force_depend_on_objects)
 
@@ -1014,6 +1037,9 @@ def construct_arguments(
         # https://doc.rust-lang.org/rustc/instrument-coverage.html
         rustc_flags.add("--codegen=instrument-coverage")
 
+    if toolchain._experimental_link_std_dylib:
+        rustc_flags.add("--codegen=prefer-dynamic")
+
     # Make bin crate data deps available to tests.
     for data in getattr(attr, "data", []):
         if rust_common.crate_info in data:
@@ -1027,17 +1053,26 @@ def construct_arguments(
     env.update(toolchain.env)
 
     # Update environment with user provided variables.
-    env.update(expand_dict_value_locations(
-        ctx,
-        crate_info.rustc_env,
-        data_paths,
-    ))
+    if skip_expanding_rustc_env:
+        env.update(crate_info.rustc_env)
+    else:
+        env.update(expand_dict_value_locations(
+            ctx,
+            crate_info.rustc_env,
+            data_paths,
+        ))
 
     # Ensure the sysroot is set for the target platform
-    env["SYSROOT"] = toolchain.sysroot
+    if not toolchain._incompatible_no_rustc_sysroot_env:
+        env["SYSROOT"] = toolchain.sysroot
+    if toolchain._experimental_toolchain_generated_sysroot:
+        rustc_flags.add(toolchain.sysroot, format = "--sysroot=%s")
 
     if toolchain._rename_first_party_crates:
         env["RULES_RUST_THIRD_PARTY_DIR"] = toolchain._third_party_dir
+
+    if crate_info.type in toolchain.extra_rustc_flags_for_crate_types.keys():
+        rustc_flags.add_all(toolchain.extra_rustc_flags_for_crate_types[crate_info.type])
 
     if is_exec_configuration(ctx):
         rustc_flags.add_all(toolchain.extra_exec_rustc_flags)
@@ -1064,6 +1099,9 @@ def construct_arguments(
     if _is_no_std(ctx, toolchain, crate_info):
         rustc_flags.add('--cfg=feature="no_std"')
 
+    # Needed for bzlmod-aware runfiles resolution.
+    env["REPOSITORY_NAME"] = ctx.label.workspace_name
+
     # Create a struct which keeps the arguments separate so each may be tuned or
     # replaced where necessary
     args = struct(
@@ -1079,21 +1117,25 @@ def rustc_compile_action(
         ctx,
         attr,
         toolchain,
-        crate_info,
-        output_hash = None,
         rust_flags = [],
-        force_all_deps_direct = False):
+        output_hash = None,
+        force_all_deps_direct = False,
+        crate_info_dict = None,
+        skip_expanding_rustc_env = False,
+        include_coverage = True):
     """Create and run a rustc compile action based on the current rule's attributes
 
     Args:
         ctx (ctx): The rule's context object
         attr (struct): Attributes to use for the rust compile action
         toolchain (rust_toolchain): The current `rust_toolchain`
-        crate_info (CrateInfo): The CrateInfo provider for the current target.
         output_hash (str, optional): The hashed path of the crate root. Defaults to None.
         rust_flags (list, optional): Additional flags to pass to rustc. Defaults to [].
         force_all_deps_direct (bool, optional): Whether to pass the transitive rlibs with --extern
             to the commandline as opposed to -L.
+        crate_info_dict: A mutable dict used to create CrateInfo provider
+        skip_expanding_rustc_env (bool, optional): Whether to expand CrateInfo.rustc_env
+        include_coverage (bool, optional): Whether to generate coverage information or not.
 
     Returns:
         list: A list of the following providers:
@@ -1101,7 +1143,11 @@ def rustc_compile_action(
             - (DepInfo): The transitive dependencies of this crate.
             - (DefaultInfo): The output file for this crate, and its runfiles.
     """
-    build_metadata = getattr(crate_info, "metadata", None)
+    crate_info = rust_common.create_crate_info(**crate_info_dict)
+
+    build_metadata = crate_info_dict.get("metadata", None)
+    rustc_output = crate_info_dict.get("rustc_output", None)
+    rustc_rmeta_output = crate_info_dict.get("rustc_rmeta_output", None)
 
     cc_toolchain, feature_configuration = find_cc_toolchain(ctx)
 
@@ -1119,9 +1165,9 @@ def rustc_compile_action(
             experimental_use_cc_common_link = toolchain._experimental_use_cc_common_link
 
     dep_info, build_info, linkstamps = collect_deps(
-        deps = crate_info.deps,
-        proc_macro_deps = crate_info.proc_macro_deps,
-        aliases = crate_info.aliases,
+        deps = crate_info_dict["deps"],
+        proc_macro_deps = crate_info_dict["proc_macro_deps"],
+        aliases = crate_info_dict["aliases"],
         are_linkstamps_supported = _are_linkstamps_supported(
             feature_configuration = feature_configuration,
             has_grep_includes = hasattr(ctx.attr, "_use_grep_includes"),
@@ -1180,7 +1226,8 @@ def rustc_compile_action(
         build_flags_files = build_flags_files,
         force_all_deps_direct = force_all_deps_direct,
         stamp = stamp,
-        use_json_output = bool(build_metadata),
+        use_json_output = bool(build_metadata) or bool(rustc_output) or bool(rustc_rmeta_output),
+        skip_expanding_rustc_env = skip_expanding_rustc_env,
     )
 
     args_metadata = None
@@ -1210,6 +1257,8 @@ def rustc_compile_action(
         )
 
     env = dict(ctx.configuration.default_shell_env)
+
+    # this is the final list of env vars
     env.update(env_from_args)
 
     if hasattr(attr, "version") and attr.version != "0.0.0":
@@ -1240,13 +1289,18 @@ def rustc_compile_action(
 
     # The action might generate extra output that we don't want to include in the `DefaultInfo` files.
     action_outputs = list(outputs)
+    if rustc_output:
+        action_outputs.append(rustc_output)
+
+    # Get the compilation mode for the current target.
+    compilation_mode = get_compilation_mode_opts(ctx, toolchain)
 
     # Rustc generates a pdb file (on Windows) or a dsym folder (on macos) so provide it in an output group for crate
     # types that benefit from having debug information in a separate file.
     pdb_file = None
     dsym_folder = None
     if crate_info.type in ("cdylib", "bin"):
-        if toolchain.target_os == "windows":
+        if toolchain.target_os == "windows" and compilation_mode.strip_level == "none":
             pdb_file = ctx.actions.declare_file(crate_info.output.basename[:-len(crate_info.output.extension)] + "pdb", sibling = crate_info.output)
             action_outputs.append(pdb_file)
         elif toolchain.target_os == "darwin":
@@ -1268,12 +1322,13 @@ def rustc_compile_action(
                 formatted_version,
                 len(crate_info.srcs.to_list()),
             ),
+            toolchain = "@rules_rust//rust:toolchain_type",
         )
         if args_metadata:
             ctx.actions.run(
                 executable = ctx.executable._process_wrapper,
                 inputs = compile_inputs,
-                outputs = [build_metadata],
+                outputs = [build_metadata] + [x for x in [rustc_rmeta_output] if x],
                 env = env,
                 arguments = args_metadata.all,
                 mnemonic = "RustcMetadata",
@@ -1283,17 +1338,18 @@ def rustc_compile_action(
                     formatted_version,
                     len(crate_info.srcs.to_list()),
                 ),
+                toolchain = "@rules_rust//rust:toolchain_type",
             )
-    else:
+    elif hasattr(ctx.executable, "_bootstrap_process_wrapper"):
         # Run without process_wrapper
         if build_env_files or build_flags_files or stamp or build_metadata:
             fail("build_env_files, build_flags_files, stamp, build_metadata are not supported when building without process_wrapper")
         ctx.actions.run(
-            executable = toolchain.rustc,
+            executable = ctx.executable._bootstrap_process_wrapper,
             inputs = compile_inputs,
             outputs = action_outputs,
             env = env,
-            arguments = [args.rustc_flags],
+            arguments = [args.rustc_path, args.rustc_flags],
             mnemonic = "Rustc",
             progress_message = "Compiling Rust (without process_wrapper) {} {}{} ({} files)".format(
                 crate_info.type,
@@ -1301,7 +1357,10 @@ def rustc_compile_action(
                 formatted_version,
                 len(crate_info.srcs.to_list()),
             ),
+            toolchain = "@rules_rust//rust:toolchain_type",
         )
+    else:
+        fail("No process wrapper was defined for {}".format(ctx.label))
 
     if experimental_use_cc_common_link:
         # Wrap the main `.o` file into a compilation output suitable for
@@ -1412,11 +1471,25 @@ def rustc_compile_action(
             runfiles = runfiles,
             executable = executable,
         ),
-        coverage_common.instrumented_files_info(
-            ctx,
-            **instrumented_files_kwargs
-        ),
     ]
+
+    # When invoked by aspects (and when running `bazel coverage`), the
+    # baseline_coverage.dat created here will conflict with the baseline_coverage.dat of the
+    # underlying target, which is a build failure. So we add an option to disable it so that this
+    # function can be invoked from aspects for rules that have its own InstrumentedFilesInfo.
+    if include_coverage:
+        providers.append(
+            coverage_common.instrumented_files_info(
+                ctx,
+                **instrumented_files_kwargs
+            ),
+        )
+
+    if crate_info_dict != None:
+        crate_info_dict.update({
+            "rustc_env": env,
+        })
+        crate_info = rust_common.create_crate_info(**crate_info_dict)
 
     if crate_info.type in ["staticlib", "cdylib"]:
         # These rules are not supposed to be depended on by other rust targets, and
@@ -1427,14 +1500,25 @@ def rustc_compile_action(
     else:
         providers.extend([crate_info, dep_info])
 
-    if toolchain.target_arch != "wasm32":
-        providers += establish_cc_info(ctx, attr, crate_info, toolchain, cc_toolchain, feature_configuration, interface_library)
+    providers += establish_cc_info(ctx, attr, crate_info, toolchain, cc_toolchain, feature_configuration, interface_library)
+
+    output_group_info = {}
+
     if pdb_file:
-        providers.append(OutputGroupInfo(pdb_file = depset([pdb_file])))
+        output_group_info["pdb_file"] = depset([pdb_file])
     if dsym_folder:
-        providers.append(OutputGroupInfo(dsym_folder = depset([dsym_folder])))
+        output_group_info["dsym_folder"] = depset([dsym_folder])
     if build_metadata:
-        providers.append(OutputGroupInfo(build_metadata = depset([build_metadata])))
+        output_group_info["build_metadata"] = depset([build_metadata])
+    if build_metadata:
+        output_group_info["build_metadata"] = depset([build_metadata])
+        if rustc_rmeta_output:
+            output_group_info["rustc_rmeta_output"] = depset([rustc_rmeta_output])
+    if rustc_output:
+        output_group_info["rustc_output"] = depset([rustc_output])
+
+    if output_group_info:
+        providers.append(OutputGroupInfo(**output_group_info))
 
     return providers
 
@@ -1586,21 +1670,23 @@ def add_edition_flags(args, crate):
     if crate.edition != "2015":
         args.add(crate.edition, format = "--edition=%s")
 
-def _create_extra_input_args(build_info, dep_info):
+def _create_extra_input_args(build_info, dep_info, include_link_flags = True):
     """Gather additional input arguments from transitive dependencies
 
     Args:
         build_info (BuildInfo): The BuildInfo provider from the target Crate's set of inputs.
         dep_info (DepInfo): The Depinfo provider form the target Crate's set of inputs.
+        include_link_flags (bool, optional): Whether to include flags like `-l` that instruct the linker to search for a library.
 
     Returns:
         tuple: A tuple of the following items:
             - (depset[File]): A list of all build info `OUT_DIR` File objects
             - (str): The `OUT_DIR` of the current build info
             - (File): An optional generated environment file from a `cargo_build_script` target
-            - (depset[File]): All direct and transitive build flag files from the current build info.
+            - (depset[File]): All direct and transitive build flag files from the current build info to be passed to rustc.
     """
     input_files = []
+    input_depsets = []
 
     # Arguments to the commandline line wrapper that are going to be used
     # to create the final command line
@@ -1609,15 +1695,20 @@ def _create_extra_input_args(build_info, dep_info):
     build_flags_files = []
 
     if build_info:
-        out_dir = build_info.out_dir.path
+        if build_info.out_dir:
+            out_dir = build_info.out_dir.path
+            input_files.append(build_info.out_dir)
         build_env_file = build_info.rustc_env
-        build_flags_files.append(build_info.flags)
-        build_flags_files.append(build_info.link_flags)
-        input_files.append(build_info.out_dir)
-        input_files.append(build_info.link_flags)
+        if build_info.flags:
+            build_flags_files.append(build_info.flags)
+        if build_info.linker_flags and include_link_flags:
+            build_flags_files.append(build_info.linker_flags)
+            input_files.append(build_info.linker_flags)
+
+        input_depsets.append(build_info.compile_data)
 
     return (
-        depset(input_files, transitive = [dep_info.link_search_path_files]),
+        depset(input_files, transitive = [dep_info.link_search_path_files] + input_depsets),
         out_dir,
         build_env_file,
         depset(build_flags_files, transitive = [dep_info.link_search_path_files]),
@@ -1647,6 +1738,16 @@ def _compute_rpaths(toolchain, output_dir, dep_info, use_pic):
         for lib in linker_input.libraries
         if _is_dylib(lib)
     ]
+
+    # Include std dylib if dylib linkage is enabled
+    if toolchain._experimental_link_std_dylib:
+        # TODO: Make toolchain.rust_std to only include libstd.so
+        # When dylib linkage is enabled, toolchain.rust_std should only need to
+        # include libstd.so. Hence, no filtering needed.
+        for file in toolchain.rust_std.to_list():
+            if is_std_dylib(file):
+                dylibs.append(file)
+
     if not dylibs:
         return depset([])
 
@@ -1654,7 +1755,7 @@ def _compute_rpaths(toolchain, output_dir, dep_info, use_pic):
     # without a version of Bazel that includes
     # https://github.com/bazelbuild/bazel/pull/13427. This is known to not be
     # included in Bazel 4.1 and below.
-    if toolchain.target_os != "linux" and toolchain.target_os != "darwin":
+    if toolchain.target_os not in ["linux", "darwin", "android"]:
         fail("Runtime linking is not supported on {}, but found {}".format(
             toolchain.target_os,
             dep_info.transitive_noncrates,
@@ -1824,8 +1925,8 @@ def _portable_link_flags(lib, use_pic, ambiguous_libs, get_lib_name, for_windows
 
     return []
 
-def _make_link_flags_windows(linker_input_and_use_pic_and_ambiguous_libs, flavor_msvc):
-    linker_input, use_pic, ambiguous_libs = linker_input_and_use_pic_and_ambiguous_libs
+def _make_link_flags_windows(make_link_flags_args, flavor_msvc):
+    linker_input, use_pic, ambiguous_libs, include_link_flags = make_link_flags_args
     ret = []
     for lib in linker_input.libraries:
         if lib.alwayslink:
@@ -1840,18 +1941,18 @@ def _make_link_flags_windows(linker_input_and_use_pic_and_ambiguous_libs, flavor
                     "-C",
                     "link-arg=-Wl,--no-whole-archive",
                 ])
-        else:
+        elif include_link_flags:
             ret.extend(_portable_link_flags(lib, use_pic, ambiguous_libs, get_lib_name_for_windows, for_windows = True, flavor_msvc = flavor_msvc))
     return ret
 
-def _make_link_flags_windows_msvc(linker_input_and_use_pic_and_ambiguous_libs):
-    return _make_link_flags_windows(linker_input_and_use_pic_and_ambiguous_libs, flavor_msvc = True)
+def _make_link_flags_windows_msvc(make_link_flags_args):
+    return _make_link_flags_windows(make_link_flags_args, flavor_msvc = True)
 
-def _make_link_flags_windows_gnu(linker_input_and_use_pic_and_ambiguous_libs):
-    return _make_link_flags_windows(linker_input_and_use_pic_and_ambiguous_libs, flavor_msvc = False)
+def _make_link_flags_windows_gnu(make_link_flags_args):
+    return _make_link_flags_windows(make_link_flags_args, flavor_msvc = False)
 
-def _make_link_flags_darwin(linker_input_and_use_pic_and_ambiguous_libs):
-    linker_input, use_pic, ambiguous_libs = linker_input_and_use_pic_and_ambiguous_libs
+def _make_link_flags_darwin(make_link_flags_args):
+    linker_input, use_pic, ambiguous_libs, include_link_flags = make_link_flags_args
     ret = []
     for lib in linker_input.libraries:
         if lib.alwayslink:
@@ -1859,12 +1960,12 @@ def _make_link_flags_darwin(linker_input_and_use_pic_and_ambiguous_libs):
                 "-C",
                 ("link-arg=-Wl,-force_load,%s" % get_preferred_artifact(lib, use_pic).path),
             ])
-        else:
+        elif include_link_flags:
             ret.extend(_portable_link_flags(lib, use_pic, ambiguous_libs, get_lib_name_default, for_darwin = True))
     return ret
 
-def _make_link_flags_default(linker_input_and_use_pic_and_ambiguous_libs):
-    linker_input, use_pic, ambiguous_libs = linker_input_and_use_pic_and_ambiguous_libs
+def _make_link_flags_default(make_link_flags_args):
+    linker_input, use_pic, ambiguous_libs, include_link_flags = make_link_flags_args
     ret = []
     for lib in linker_input.libraries:
         if lib.alwayslink:
@@ -1876,17 +1977,17 @@ def _make_link_flags_default(linker_input_and_use_pic_and_ambiguous_libs):
                 "-C",
                 "link-arg=-Wl,--no-whole-archive",
             ])
-        else:
+        elif include_link_flags:
             ret.extend(_portable_link_flags(lib, use_pic, ambiguous_libs, get_lib_name_default))
     return ret
 
-def _libraries_dirnames(linker_input_and_use_pic_and_ambiguous_libs):
-    link_input, use_pic, _ = linker_input_and_use_pic_and_ambiguous_libs
+def _libraries_dirnames(make_link_flags_args):
+    link_input, use_pic, _, _ = make_link_flags_args
 
     # De-duplicate names.
     return depset([get_preferred_artifact(lib, use_pic).dirname for lib in link_input.libraries]).to_list()
 
-def _add_native_link_flags(args, dep_info, linkstamp_outs, ambiguous_libs, crate_type, toolchain, cc_toolchain, feature_configuration, compilation_mode):
+def _add_native_link_flags(args, dep_info, linkstamp_outs, ambiguous_libs, crate_type, toolchain, cc_toolchain, feature_configuration, compilation_mode, include_link_flags = True):
     """Adds linker flags for all dependencies of the current target.
 
     Args:
@@ -1899,6 +2000,7 @@ def _add_native_link_flags(args, dep_info, linkstamp_outs, ambiguous_libs, crate
         cc_toolchain (CcToolchainInfo): The current `cc_toolchain`
         feature_configuration (FeatureConfiguration): feature configuration to use with cc_toolchain
         compilation_mode (bool): The compilation mode for this build.
+        include_link_flags (bool, optional): Whether to include flags like `-l` that instruct the linker to search for a library.
     """
     if crate_type in ["lib", "rlib"]:
         return
@@ -1916,15 +2018,15 @@ def _add_native_link_flags(args, dep_info, linkstamp_outs, ambiguous_libs, crate
         get_lib_name = get_lib_name_default
 
     # TODO(hlopko): Remove depset flattening by using lambdas once we are on >=Bazel 5.0
-    args_and_pic_and_ambiguous_libs = [(arg, use_pic, ambiguous_libs) for arg in dep_info.transitive_noncrates.to_list()]
-    args.add_all(args_and_pic_and_ambiguous_libs, map_each = _libraries_dirnames, uniquify = True, format_each = "-Lnative=%s")
+    make_link_flags_args = [(arg, use_pic, ambiguous_libs, include_link_flags) for arg in dep_info.transitive_noncrates.to_list()]
+    args.add_all(make_link_flags_args, map_each = _libraries_dirnames, uniquify = True, format_each = "-Lnative=%s")
     if ambiguous_libs:
         # If there are ambiguous libs, the disambiguation symlinks to them are
         # all created in the same directory. Add it to the library search path.
         ambiguous_libs_dirname = ambiguous_libs.values()[0].dirname
         args.add(ambiguous_libs_dirname, format = "-Lnative=%s")
 
-    args.add_all(args_and_pic_and_ambiguous_libs, map_each = make_link_flags)
+    args.add_all(make_link_flags_args, map_each = make_link_flags)
 
     args.add_all(linkstamp_outs, before_each = "-C", format_each = "link-args=%s")
 
@@ -1936,11 +2038,12 @@ def _add_native_link_flags(args, dep_info, linkstamp_outs, ambiguous_libs, crate
             map_each = _get_dirname,
             format_each = "-Lnative=%s",
         )
-        args.add_all(
-            cc_toolchain.dynamic_runtime_lib(feature_configuration = feature_configuration),
-            map_each = get_lib_name,
-            format_each = "-ldylib=%s",
-        )
+        if include_link_flags:
+            args.add_all(
+                cc_toolchain.dynamic_runtime_lib(feature_configuration = feature_configuration),
+                map_each = get_lib_name,
+                format_each = "-ldylib=%s",
+            )
     else:
         # For all other crate types we want to link C++ runtime library statically
         # (for example libstdc++.a or libc++.a).
@@ -1949,11 +2052,12 @@ def _add_native_link_flags(args, dep_info, linkstamp_outs, ambiguous_libs, crate
             map_each = _get_dirname,
             format_each = "-Lnative=%s",
         )
-        args.add_all(
-            cc_toolchain.static_runtime_lib(feature_configuration = feature_configuration),
-            map_each = get_lib_name,
-            format_each = "-lstatic=%s",
-        )
+        if include_link_flags:
+            args.add_all(
+                cc_toolchain.static_runtime_lib(feature_configuration = feature_configuration),
+                map_each = get_lib_name,
+                format_each = "-lstatic=%s",
+            )
 
 def _get_dirname(file):
     """A helper function for `_add_native_link_flags`.
@@ -2017,6 +2121,31 @@ error_format = rule(
     ),
     implementation = _error_format_impl,
     build_setting = config.string(flag = True),
+)
+
+def _rustc_output_diagnostics_impl(ctx):
+    """Implementation of the `rustc_output_diagnostics` rule
+
+    Args:
+        ctx (ctx): The rule's context object
+
+    Returns:
+        list: A list containing the RustcOutputDiagnosticsInfo provider
+    """
+    return [RustcOutputDiagnosticsInfo(
+        rustc_output_diagnostics = ctx.build_setting_value,
+    )]
+
+rustc_output_diagnostics = rule(
+    doc = (
+        "Setting this flag from the command line with `--@rules_rust//:rustc_output_diagnostics` " +
+        "makes rules_rust save rustc json output(suitable for consumption by rust-analyzer) in a file. " +
+        "These are accessible via the " +
+        "`rustc_rmeta_output`(for pipelined compilation) and `rustc_output` output groups. " +
+        "You can find these using `bazel cquery`"
+    ),
+    implementation = _rustc_output_diagnostics_impl,
+    build_setting = config.bool(flag = True),
 )
 
 def _extra_rustc_flags_impl(ctx):

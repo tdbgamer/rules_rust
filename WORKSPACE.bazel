@@ -45,10 +45,6 @@ load("@rules_rust//tools/rust_analyzer:deps.bzl", "rust_analyzer_dependencies")
 
 rust_analyzer_dependencies()
 
-load("@rules_rust//util/import:deps.bzl", "import_deps")
-
-import_deps()
-
 load("@rules_rust//wasm_bindgen:repositories.bzl", "rust_wasm_bindgen_repositories")
 
 rust_wasm_bindgen_repositories()
@@ -79,4 +75,11 @@ http_archive(
 # To run with RBE on Bazel CI, uncomment the following lines.
 #
 # load("@bazelci_rules//:rbe_repo.bzl", "rbe_preconfig")
-# rbe_preconfig(name = "buildkite_config", toolchain = "ubuntu1604-bazel-java8")
+# rbe_preconfig(name = "buildkite_config", toolchain = "ubuntu2004-bazel-java11")
+
+http_archive(
+    name = "rules_testing",
+    sha256 = "02c62574631876a4e3b02a1820cb51167bb9cdcdea2381b2fa9d9b8b11c407c4",
+    strip_prefix = "rules_testing-0.6.0",
+    url = "https://github.com/bazelbuild/rules_testing/releases/download/v0.6.0/rules_testing-v0.6.0.tar.gz",
+)

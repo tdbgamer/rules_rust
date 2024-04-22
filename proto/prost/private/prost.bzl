@@ -1,7 +1,17 @@
 """Rules for building protos in Rust with Prost and Tonic."""
 
 load("@rules_proto//proto:defs.bzl", "ProtoInfo", "proto_common")
+load("//proto/prost:providers.bzl", "ProstProtoInfo")
 load("//rust:defs.bzl", "rust_common")
+
+# buildifier: disable=bzl-visibility
+load("//rust/private:providers.bzl", "RustAnalyzerGroupInfo", "RustAnalyzerInfo")
+
+# buildifier: disable=bzl-visibility
+load("//rust/private:rust.bzl", "RUSTC_ATTRS")
+
+# buildifier: disable=bzl-visibility
+load("//rust/private:rust_analyzer.bzl", "write_rust_analyzer_spec_file")
 
 # buildifier: disable=bzl-visibility
 load("//rust/private:rustc.bzl", "rustc_compile_action")
@@ -12,16 +22,6 @@ load("//rust/private:utils.bzl", "can_build_metadata")
 RUST_EDITION = "2021"
 
 TOOLCHAIN_TYPE = "@rules_rust//proto/prost:toolchain_type"
-
-ProstProtoInfo = provider(
-    doc = "Rust Prost provider info",
-    fields = {
-        "dep_variant_info": "DepVariantInfo: For the compiled Rust gencode (also covers its " +
-                            "transitive dependencies)",
-        "package_info": "File: A newline delimited file of `--extern_path` values for protoc.",
-        "transitive_dep_infos": "depset[DepVariantInfo]: Transitive dependencies of the compiled crate.",
-    },
-)
 
 def _create_proto_lang_toolchain(ctx, prost_toolchain):
     proto_lang_toolchain = proto_common.ProtoLangToolchainInfo(
@@ -160,7 +160,7 @@ def _compile_rust(ctx, attr, crate_name, src, deps, edition):
         ctx = ctx,
         attr = attr,
         toolchain = toolchain,
-        crate_info = rust_common.create_crate_info(
+        crate_info_dict = dict(
             name = crate_name,
             type = "rlib",
             root = src,
@@ -216,7 +216,8 @@ def _rust_prost_aspect_impl(target, ctx):
     proto_deps = getattr(ctx.rule.attr, "deps", [])
 
     direct_deps = []
-    transitive_deps = []
+    transitive_deps = [depset(runtime_deps)]
+    rust_analyzer_deps = []
     for proto_dep in proto_deps:
         proto_info = proto_dep[ProstProtoInfo]
 
@@ -225,6 +226,9 @@ def _rust_prost_aspect_impl(target, ctx):
             [proto_info.dep_variant_info],
             transitive = [proto_info.transitive_dep_infos],
         ))
+
+        if RustAnalyzerInfo in proto_dep:
+            rust_analyzer_deps.append(proto_dep[RustAnalyzerInfo])
 
     deps = runtime_deps + direct_deps
 
@@ -250,12 +254,27 @@ def _rust_prost_aspect_impl(target, ctx):
         edition = RUST_EDITION,
     )
 
+    # Always add `test` & `debug_assertions`. See rust-analyzer source code:
+    # https://github.com/rust-analyzer/rust-analyzer/blob/2021-11-15/crates/project_model/src/workspace.rs#L529-L531
+    cfgs = ["test", "debug_assertions"]
+
+    rust_analyzer_info = write_rust_analyzer_spec_file(ctx, ctx.rule.attr, ctx.label, RustAnalyzerInfo(
+        crate = dep_variant_info.crate_info,
+        cfgs = cfgs,
+        env = dep_variant_info.crate_info.rustc_env,
+        deps = rust_analyzer_deps,
+        crate_specs = depset(transitive = [dep.crate_specs for dep in rust_analyzer_deps]),
+        proc_macro_dylib_path = None,
+        build_info = dep_variant_info.build_info,
+    ))
+
     return [
         ProstProtoInfo(
             dep_variant_info = dep_variant_info,
             transitive_dep_infos = depset(transitive = transitive_deps),
             package_info = package_info_file,
         ),
+        rust_analyzer_info,
     ]
 
 rust_prost_aspect = aspect(
@@ -263,44 +282,14 @@ rust_prost_aspect = aspect(
     implementation = _rust_prost_aspect_impl,
     attr_aspects = ["deps"],
     attrs = {
-        "_cc_toolchain": attr.label(
-            doc = (
-                "In order to use find_cc_toolchain, your rule has to depend " +
-                "on C++ toolchain. See `@rules_cc//cc:find_cc_toolchain.bzl` " +
-                "docs for details."
-            ),
-            default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
-        ),
         "_collect_cc_coverage": attr.label(
             default = Label("//util:collect_coverage"),
             executable = True,
             cfg = "exec",
         ),
-        "_error_format": attr.label(
-            default = Label("//:error_format"),
-        ),
-        "_extra_exec_rustc_flag": attr.label(
-            default = Label("//:extra_exec_rustc_flag"),
-        ),
-        "_extra_exec_rustc_flags": attr.label(
-            default = Label("//:extra_exec_rustc_flags"),
-        ),
-        "_extra_rustc_flag": attr.label(
-            default = Label("//:extra_rustc_flag"),
-        ),
-        "_extra_rustc_flags": attr.label(
-            default = Label("//:extra_rustc_flags"),
-        ),
         "_grep_includes": attr.label(
             allow_single_file = True,
             default = Label("@bazel_tools//tools/cpp:grep-includes"),
-            cfg = "exec",
-        ),
-        "_process_wrapper": attr.label(
-            doc = "A process wrapper for running rustc on all platforms.",
-            default = Label("//util/process_wrapper"),
-            executable = True,
-            allow_single_file = True,
             cfg = "exec",
         ),
         "_prost_process_wrapper": attr.label(
@@ -309,16 +298,14 @@ rust_prost_aspect = aspect(
             executable = True,
             default = Label("//proto/prost/private:protoc_wrapper"),
         ),
-    },
+    } | RUSTC_ATTRS,
     fragments = ["cpp"],
-    host_fragments = ["cpp"],
     toolchains = [
         TOOLCHAIN_TYPE,
         "@bazel_tools//tools/cpp:toolchain_type",
         "@rules_rust//rust:toolchain_type",
         "@rules_rust//rust/rustfmt:toolchain_type",
     ],
-    incompatible_use_toolchain_transition = True,
 )
 
 def _rust_prost_library_impl(ctx):
@@ -334,6 +321,7 @@ def _rust_prost_library_impl(ctx):
                 transitive = [rust_proto_info.transitive_dep_infos],
             ),
         ),
+        RustAnalyzerGroupInfo(deps = [proto_dep[RustAnalyzerInfo]]),
     ]
 
 rust_prost_library = rule(

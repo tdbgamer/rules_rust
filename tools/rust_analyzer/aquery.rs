@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::option::Option;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -77,14 +76,18 @@ pub fn get_crate_specs(
 
     let aquery_output = Command::new(bazel)
         .current_dir(workspace)
+        .env_remove("BAZELISK_SKIP_WRAPPER")
+        .env_remove("BUILD_WORKING_DIRECTORY")
+        .env_remove("BUILD_WORKSPACE_DIRECTORY")
         .arg("aquery")
         .arg("--include_aspects")
+        .arg("--include_artifacts")
         .arg(format!(
             "--aspects={rules_rust_name}//rust:defs.bzl%rust_analyzer_aspect"
         ))
         .arg("--output_groups=rust_analyzer_crate_spec")
         .arg(format!(
-            r#"outputs(".*[.]rust_analyzer_crate_spec",{target_pattern})"#
+            r#"outputs(".*\.rust_analyzer_crate_spec\.json",{target_pattern})"#
         ))
         .arg("--output=jsonproto")
         .output()?;
@@ -109,7 +112,18 @@ fn parse_aquery_output_files(
     execution_root: &Path,
     aquery_stdout: &str,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    let out: AqueryOutput = serde_json::from_str(aquery_stdout)?;
+    let out: AqueryOutput = serde_json::from_str(aquery_stdout).map_err(|_| {
+        // Parsing to `AqueryOutput` failed, try parsing into a `serde_json::Value`:
+        match serde_json::from_str::<serde_json::Value>(aquery_stdout) {
+            Ok(serde_json::Value::Object(_)) => {
+                // If the JSON is an object, it's likely that the aquery command failed.
+                anyhow::anyhow!("Aquery returned an empty result, are there any Rust targets in the specified paths?.")
+            }
+            _ => {
+                anyhow::anyhow!("Failed to parse aquery output as JSON")
+            }
+        }
+    })?;
 
     let artifacts = out
         .artifacts

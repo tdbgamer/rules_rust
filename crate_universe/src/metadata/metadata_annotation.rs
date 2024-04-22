@@ -1,7 +1,6 @@
 //! Collect and store information from Cargo metadata specific to Bazel's needs
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::TryFrom;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
@@ -11,43 +10,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Commitish, Config, CrateAnnotations, CrateId};
 use crate::metadata::dependency::DependencySet;
+use crate::select::Select;
 use crate::splicing::{SourceInfo, WorkspaceMetadata};
-use crate::utils::starlark::SelectList;
 
-pub type CargoMetadata = cargo_metadata::Metadata;
-pub type CargoLockfile = cargo_lock::Lockfile;
+pub(crate) type CargoMetadata = cargo_metadata::Metadata;
+pub(crate) type CargoLockfile = cargo_lock::Lockfile;
 
 /// Additional information about a crate relative to other crates in a dependency graph.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CrateAnnotation {
+pub(crate) struct CrateAnnotation {
     /// The crate's node in the Cargo "resolve" graph.
-    pub node: Node,
+    pub(crate) node: Node,
 
     /// The crate's sorted dependencies.
-    pub deps: DependencySet,
+    pub(crate) deps: DependencySet,
 }
 
 /// Additional information about a Cargo workspace's metadata.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct MetadataAnnotation {
+pub(crate) struct MetadataAnnotation {
     /// All packages found within the Cargo metadata
-    pub packages: BTreeMap<PackageId, Package>,
+    pub(crate) packages: BTreeMap<PackageId, Package>,
 
     /// All [CrateAnnotation]s for all packages
-    pub crates: BTreeMap<PackageId, CrateAnnotation>,
+    pub(crate) crates: BTreeMap<PackageId, CrateAnnotation>,
 
     /// All packages that are workspace members
-    pub workspace_members: BTreeSet<PackageId>,
+    pub(crate) workspace_members: BTreeSet<PackageId>,
 
     /// The path to the directory containing the Cargo workspace that produced the metadata.
-    pub workspace_root: PathBuf,
+    pub(crate) workspace_root: PathBuf,
 
     /// Information on the Cargo workspace.
-    pub workspace_metadata: WorkspaceMetadata,
+    pub(crate) workspace_metadata: WorkspaceMetadata,
 }
 
 impl MetadataAnnotation {
-    pub fn new(metadata: CargoMetadata) -> MetadataAnnotation {
+    pub(crate) fn new(metadata: CargoMetadata) -> MetadataAnnotation {
         // UNWRAP: The workspace metadata should be written by a controlled process. This should not return a result
         let workspace_metadata = find_workspace_metadata(&metadata).unwrap_or_default();
 
@@ -104,7 +103,7 @@ impl MetadataAnnotation {
 
 /// Additional information about how and where to acquire a crate's source code from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum SourceAnnotation {
+pub(crate) enum SourceAnnotation {
     Git {
         /// The Git url where to clone the source from.
         remote: String,
@@ -160,13 +159,13 @@ pub enum SourceAnnotation {
 /// Additional information related to [Cargo.lock](https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html)
 /// data used for improved determinism.
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-pub struct LockfileAnnotation {
+pub(crate) struct LockfileAnnotation {
     /// A mapping of crates/packages to additional source (network location) information.
-    pub crates: BTreeMap<PackageId, SourceAnnotation>,
+    pub(crate) crates: BTreeMap<PackageId, SourceAnnotation>,
 }
 
 impl LockfileAnnotation {
-    pub fn new(lockfile: CargoLockfile, metadata: &CargoMetadata) -> Result<Self> {
+    pub(crate) fn new(lockfile: CargoLockfile, metadata: &CargoMetadata) -> Result<Self> {
         let workspace_metadata = find_workspace_metadata(metadata).unwrap_or_default();
 
         let nodes: Vec<&Node> = metadata
@@ -245,7 +244,10 @@ impl LockfileAnnotation {
 
             return Ok(SourceAnnotation::Git {
                 remote: source.url().to_string(),
-                commitish: Commitish::from(git_ref.clone()),
+                commitish: source
+                    .precise()
+                    .map(|rev| Commitish::Rev(rev.to_string()))
+                    .unwrap_or(Commitish::from(git_ref.clone())),
                 shallow_since: None,
                 strip_prefix,
                 patch_args: None,
@@ -270,10 +272,11 @@ impl LockfileAnnotation {
         // metadata the raw source info is used for registry crates and `crates.io` is
         // assumed to be the source.
         if source.is_registry() {
+            // source url
             return Ok(SourceAnnotation::Http {
                 url: format!(
-                    "https://crates.io/api/v1/crates/{}/{}/download",
-                    lock_pkg.name, lock_pkg.version,
+                    "https://static.crates.io/crates/{}/{}/download",
+                    lock_pkg.name, lock_pkg.version
                 ),
                 sha256: lock_pkg
                     .checksum
@@ -303,7 +306,7 @@ impl LockfileAnnotation {
         package: &cargo_lock::Package,
         metadata: &WorkspaceMetadata,
     ) -> Option<SourceInfo> {
-        let crate_id = CrateId::new(package.name.to_string(), package.version.to_string());
+        let crate_id = CrateId::new(package.name.to_string(), package.version.clone());
         metadata.sources.get(&crate_id).cloned()
     }
 
@@ -337,36 +340,36 @@ impl LockfileAnnotation {
 }
 
 /// A pairing of a crate's package identifier to its annotations.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PairredExtras {
+#[derive(Debug)]
+pub(crate) struct PairedExtras {
     /// The crate's package identifier
-    pub package_id: cargo_metadata::PackageId,
+    pub(crate) package_id: cargo_metadata::PackageId,
 
     /// The crate's annotations
-    pub crate_extra: CrateAnnotations,
+    pub(crate) crate_extra: CrateAnnotations,
 }
 
 /// A collection of data which has been processed for optimal use in generating Bazel targets.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Annotations {
+#[derive(Debug, Default)]
+pub(crate) struct Annotations {
     /// Annotated Cargo metadata
-    pub metadata: MetadataAnnotation,
+    pub(crate) metadata: MetadataAnnotation,
 
     /// Annotated Cargo lockfile
-    pub lockfile: LockfileAnnotation,
+    pub(crate) lockfile: LockfileAnnotation,
 
     /// The current workspace's configuration settings
-    pub config: Config,
+    pub(crate) config: Config,
 
     /// Pairred crate annotations
-    pub pairred_extras: BTreeMap<CrateId, PairredExtras>,
+    pub(crate) pairred_extras: BTreeMap<CrateId, PairedExtras>,
 
     /// Feature set for each target triplet and crate.
-    pub features: BTreeMap<CrateId, SelectList<String>>,
+    pub(crate) crate_features: BTreeMap<CrateId, Select<BTreeSet<String>>>,
 }
 
 impl Annotations {
-    pub fn new(
+    pub(crate) fn new(
         cargo_metadata: CargoMetadata,
         cargo_lockfile: CargoLockfile,
         config: Config,
@@ -391,7 +394,7 @@ impl Annotations {
                         // Mark that an annotation has been consumed
                         unused_extra_annotations.remove(id);
 
-                        // Fitler out the annotation
+                        // Filter out the annotation
                         extra
                     })
                     .cloned()
@@ -403,8 +406,8 @@ impl Annotations {
                     None
                 } else {
                     Some((
-                        CrateId::new(pkg.name.clone(), pkg.version.to_string()),
-                        PairredExtras {
+                        CrateId::new(pkg.name.clone(), pkg.version.clone()),
+                        PairedExtras {
                             package_id: pkg_id.clone(),
                             crate_extra,
                         },
@@ -421,7 +424,7 @@ impl Annotations {
             );
         }
 
-        let features = metadata_annotation.workspace_metadata.features.clone();
+        let crate_features = metadata_annotation.workspace_metadata.features.clone();
 
         // Annotate metadata
         Ok(Annotations {
@@ -429,7 +432,7 @@ impl Annotations {
             lockfile: lockfile_annotation,
             config,
             pairred_extras,
-            features,
+            crate_features,
         })
     }
 }
@@ -445,7 +448,7 @@ fn is_workspace_member(id: &PackageId, cargo_metadata: &CargoMetadata) -> bool {
     if cargo_metadata.workspace_members.contains(id) {
         if let Some(data) = find_workspace_metadata(cargo_metadata) {
             let pkg = &cargo_metadata[id];
-            let crate_id = CrateId::new(pkg.name.clone(), pkg.version.to_string());
+            let crate_id = CrateId::new(pkg.name.clone(), pkg.version.clone());
 
             !data.sources.contains_key(&crate_id)
         } else {
@@ -469,6 +472,7 @@ fn cargo_meta_pkg_to_locked_pkg<'a>(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::config::CrateNameAndVersionReq;
 
     use crate::test::*;
 
@@ -530,7 +534,7 @@ mod test {
                 .crates;
         let tracing_core = crates
             .iter()
-            .find(|(k, _)| k.repr.starts_with("tracing-core "))
+            .find(|(k, _)| k.repr.contains("#tracing-core@"))
             .map(|(_, v)| v)
             .unwrap();
         match tracing_core {
@@ -547,11 +551,34 @@ mod test {
     }
 
     #[test]
+    fn resolves_commit_from_branches_and_tags() {
+        let crates =
+            LockfileAnnotation::new(test::lockfile::git_repos(), &test::metadata::git_repos())
+                .unwrap()
+                .crates;
+
+        let package_id = PackageId {
+            repr: "git+https://github.com/tokio-rs/tracing.git?branch=master#tracing@0.2.0".into(),
+        };
+        let annotation = crates.get(&package_id).unwrap();
+
+        let commitish = match annotation {
+            SourceAnnotation::Git { commitish, .. } => commitish,
+            _ => panic!("Unexpected annotation type"),
+        };
+
+        assert_eq!(
+            *commitish,
+            Commitish::Rev("1e09e50e8d15580b5929adbade9c782a6833e4a0".into())
+        );
+    }
+
+    #[test]
     fn detect_unused_annotation() {
         // Create a config with some random annotation
         let mut config = Config::default();
         config.annotations.insert(
-            CrateId::new("mock-crate".to_owned(), "0.1.0".to_owned()),
+            CrateNameAndVersionReq::new("mock-crate".to_owned(), "0.1.0".parse().unwrap()),
             CrateAnnotations::default(),
         );
 
@@ -565,20 +592,26 @@ mod test {
 
     #[test]
     fn defaults_from_package_metadata() {
-        let crate_id = CrateId::new("has_package_metadata".to_owned(), "0.0.0".to_owned());
+        let crate_id = CrateId::new(
+            "has_package_metadata".to_owned(),
+            semver::Version::new(0, 0, 0),
+        );
+        let crate_name_and_version_req = CrateNameAndVersionReq::new(
+            "has_package_metadata".to_owned(),
+            "0.0.0".parse().unwrap(),
+        );
         let annotations = CrateAnnotations {
-            rustc_env: Some({
-                let mut rustc_env = BTreeMap::new();
-                rustc_env.insert("BAR".to_owned(), "bar is set".to_owned());
-                rustc_env
-            }),
+            rustc_env: Some(Select::from_value(BTreeMap::from([(
+                "BAR".to_owned(),
+                "bar is set".to_owned(),
+            )]))),
             ..CrateAnnotations::default()
         };
 
         let mut config = Config::default();
         config
             .annotations
-            .insert(crate_id.clone(), annotations.clone());
+            .insert(crate_name_and_version_req, annotations.clone());
 
         // Combine the above annotations with default values provided by the
         // crate author in package metadata.

@@ -1,20 +1,22 @@
 use std::collections::BTreeSet;
 
 use serde::ser::{SerializeMap, SerializeTupleStruct, Serializer};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_starlark::{FunctionCall, MULTILINE};
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Clone)]
-pub struct TargetCompatibleWith {
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub(crate) struct TargetCompatibleWith {
     target_triples: BTreeSet<String>,
 }
 
 impl TargetCompatibleWith {
-    pub fn new(target_triples: BTreeSet<String>) -> Self {
+    pub(crate) fn new(target_triples: BTreeSet<String>) -> Self {
         TargetCompatibleWith { target_triples }
     }
+}
 
-    pub fn serialize_starlark<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+impl Serialize for TargetCompatibleWith {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -84,7 +86,7 @@ mod test {
 
         assert_eq!(
             target_compatible_with
-                .serialize_starlark(serde_starlark::Serializer)
+                .serialize(serde_starlark::Serializer)
                 .unwrap(),
             expected_starlark,
         );

@@ -1,6 +1,6 @@
 //! Convert annotated metadata into a renderable context
 
-pub mod crate_context;
+pub(crate) mod crate_context;
 mod platforms;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,42 +11,48 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::config::CrateId;
-use crate::context::crate_context::{CrateContext, CrateDependency, Rule};
 use crate::context::platforms::resolve_cfg_platforms;
 use crate::lockfile::Digest;
-use crate::metadata::Annotations;
-use crate::utils::starlark::Select;
+use crate::metadata::{Annotations, Dependency};
+use crate::select::Select;
+use crate::utils::target_triple::TargetTriple;
 
-pub use self::crate_context::*;
+pub(crate) use self::crate_context::*;
 
 /// A struct containing information about a Cargo dependency graph in an easily to consume
 /// format for rendering reproducible Bazel targets.
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone)]
-pub struct Context {
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Context {
     /// The collective checksum of all inputs to the context
-    pub checksum: Option<Digest>,
+    pub(crate) checksum: Option<Digest>,
 
     /// The collection of all crates that make up the dependency graph
-    pub crates: BTreeMap<CrateId, CrateContext>,
+    pub(crate) crates: BTreeMap<CrateId, CrateContext>,
 
     /// A subset of only crates with binary targets
-    pub binary_crates: BTreeSet<CrateId>,
+    pub(crate) binary_crates: BTreeSet<CrateId>,
 
     /// A subset of workspace members mapping to their workspace
     /// path relative to the workspace root
-    pub workspace_members: BTreeMap<CrateId, String>,
+    pub(crate) workspace_members: BTreeMap<CrateId, String>,
 
     /// A mapping of `cfg` flags to platform triples supporting the configuration
-    pub conditions: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) conditions: BTreeMap<String, BTreeSet<TargetTriple>>,
+
+    /// A list of crates visible to any bazel module.
+    pub(crate) direct_deps: BTreeSet<CrateId>,
+
+    /// A list of crates visible to this bazel module.
+    pub(crate) direct_dev_deps: BTreeSet<CrateId>,
 }
 
 impl Context {
-    pub fn try_from_path<T: AsRef<Path>>(path: T) -> Result<Self> {
+    pub(crate) fn try_from_path<T: AsRef<Path>>(path: T) -> Result<Self> {
         let data = fs::read_to_string(path.as_ref())?;
         Ok(serde_json::from_str(&data)?)
     }
 
-    pub fn new(annotations: Annotations) -> Result<Self> {
+    pub(crate) fn new(annotations: Annotations) -> Result<Self> {
         // Build a map of crate contexts
         let crates: BTreeMap<CrateId, CrateContext> = annotations
             .metadata
@@ -58,7 +64,7 @@ impl Context {
                     &annotations.metadata.packages,
                     &annotations.lockfile.crates,
                     &annotations.pairred_extras,
-                    &annotations.features,
+                    &annotations.crate_features,
                     annotations.config.generate_binaries,
                     annotations.config.generate_build_scripts,
                 );
@@ -99,7 +105,7 @@ impl Context {
                     Ok(id) => id,
                     Err(e) => return Some(Err(e)),
                 };
-                let crate_id = CrateId::new(pkg.name.clone(), pkg.version.to_string());
+                let crate_id = CrateId::from(pkg);
 
                 // Crates that have repository information are not considered workspace members.
                 // The assumpion is that they are "extra workspace members".
@@ -110,12 +116,36 @@ impl Context {
             })
             .collect::<Result<BTreeMap<CrateId, String>>>()?;
 
+        let add_crate_ids = |crates: &mut BTreeSet<CrateId>,
+                             deps: &Select<BTreeSet<Dependency>>| {
+            for dep in deps.values() {
+                crates.insert(CrateId::from(
+                    &annotations.metadata.packages[&dep.package_id],
+                ));
+            }
+        };
+
+        let mut direct_deps: BTreeSet<CrateId> = BTreeSet::new();
+        let mut direct_dev_deps: BTreeSet<CrateId> = BTreeSet::new();
+        for id in &annotations.metadata.workspace_members {
+            let deps = &annotations.metadata.crates[id].deps;
+            add_crate_ids(&mut direct_deps, &deps.normal_deps);
+            add_crate_ids(&mut direct_deps, &deps.proc_macro_deps);
+            add_crate_ids(&mut direct_deps, &deps.build_deps);
+            add_crate_ids(&mut direct_deps, &deps.build_link_deps);
+            add_crate_ids(&mut direct_deps, &deps.build_proc_macro_deps);
+            add_crate_ids(&mut direct_dev_deps, &deps.normal_dev_deps);
+            add_crate_ids(&mut direct_dev_deps, &deps.proc_macro_dev_deps);
+        }
+
         Ok(Self {
             checksum: None,
             crates,
             binary_crates,
             workspace_members,
             conditions,
+            direct_dev_deps: direct_dev_deps.difference(&direct_deps).cloned().collect(),
+            direct_deps,
         })
     }
 
@@ -161,7 +191,7 @@ impl Context {
     }
 
     /// Create a set of all direct dependencies of workspace member crates.
-    pub fn workspace_member_deps(&self) -> BTreeSet<&CrateDependency> {
+    pub(crate) fn workspace_member_deps(&self) -> BTreeSet<CrateDependency> {
         self.workspace_members
             .keys()
             .map(move |id| &self.crates[id])
@@ -172,16 +202,12 @@ impl Context {
                     &ctx.common_attrs.proc_macro_deps,
                     &ctx.common_attrs.proc_macro_deps_dev,
                 ])
-                .flat_map(|deps| {
-                    deps.configurations().into_iter().flat_map(move |conf| {
-                        deps.get_iter(conf).expect("Lookup should be guaranteed")
-                    })
-                })
+                .flat_map(|deps| deps.values())
             })
             .collect()
     }
 
-    pub fn has_duplicate_workspace_member_dep(&self, dep: &CrateDependency) -> bool {
+    pub(crate) fn has_duplicate_workspace_member_dep(&self, dep: &CrateDependency) -> bool {
         1 < self
             .workspace_member_deps()
             .into_iter()
@@ -189,7 +215,7 @@ impl Context {
             .count()
     }
 
-    pub fn has_duplicate_binary_crate(&self, bin: &CrateId) -> bool {
+    pub(crate) fn has_duplicate_binary_crate(&self, bin: &CrateId) -> bool {
         1 < self
             .binary_crates
             .iter()
@@ -201,6 +227,7 @@ impl Context {
 #[cfg(test)]
 mod test {
     use super::*;
+    use semver::Version;
 
     use crate::config::Config;
 
@@ -237,8 +264,8 @@ mod test {
                 .map(|dep| (&dep.id, context.has_duplicate_workspace_member_dep(dep)))
                 .collect::<Vec<_>>(),
             [
-                (&CrateId::new("bitflags".to_owned(), "1.3.2".to_owned()), false),
-                (&CrateId::new("cfg-if".to_owned(), "1.0.0".to_owned()), false),
+                (&CrateId::new("bitflags".to_owned(), Version::new(1, 3, 2)), false),
+                (&CrateId::new("cfg-if".to_owned(), Version::new(1, 0, 0)), false),
             ],
         }
     }
@@ -254,17 +281,18 @@ mod test {
                 .map(|dep| (&dep.id, context.has_duplicate_workspace_member_dep(dep)))
                 .collect::<Vec<_>>(),
             [
-                (&CrateId::new("log".to_owned(), "0.3.9".to_owned()), false),
-                (&CrateId::new("log".to_owned(), "0.4.14".to_owned()), false),
-                (&CrateId::new("names".to_owned(), "0.12.1-dev".to_owned()), false),
-                (&CrateId::new("names".to_owned(), "0.13.0".to_owned()), false),
-                (&CrateId::new("value-bag".to_owned(), "1.0.0-alpha.7".to_owned()), false),
+                (&CrateId::new("log".to_owned(), Version::new(0, 3, 9)), false),
+                (&CrateId::new("log".to_owned(), Version::new(0, 4, 21)), false),
+                (&CrateId::new("names".to_owned(), Version::parse("0.12.1-dev").unwrap()), false),
+                (&CrateId::new("names".to_owned(), Version::new(0, 13, 0)), false),
+                (&CrateId::new("surrealdb".to_owned(), Version::new(1, 3, 1)), false),
+                (&CrateId::new("value-bag".to_owned(), Version::parse("1.0.0-alpha.7").unwrap()), false),
             ],
         }
     }
 
     #[test]
-    fn seralization() {
+    fn serialization() {
         let context = mock_context_aliases();
 
         // Seralize and deseralize the context object

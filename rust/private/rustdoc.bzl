@@ -96,6 +96,7 @@ def rustdoc_compile_action(
         build_info = build_info,
         # If this is a rustdoc test, we need to depend on rlibs rather than .rmeta.
         force_depend_on_objects = is_test,
+        include_link_flags = False,
     )
 
     # Since this crate is not actually producing the output described by the
@@ -123,8 +124,10 @@ def rustdoc_compile_action(
         build_flags_files = build_flags_files,
         emit = [],
         remap_path_prefix = None,
-        rustdoc = True,
+        add_flags_for_binary = True,
+        include_link_flags = False,
         force_depend_on_objects = is_test,
+        skip_expanding_rustc_env = True,
     )
 
     # Because rustdoc tests compile tests outside of the sandbox, the sysroot
@@ -135,10 +138,6 @@ def rustdoc_compile_action(
             env.update({"SYSROOT": "${{pwd}}/{}".format(toolchain.sysroot_short_path)})
         if "OUT_DIR" in env:
             env.update({"OUT_DIR": "${{pwd}}/{}".format(build_info.out_dir.short_path)})
-
-        # `rustdoc` does not support the SYSROOT environment variable. To account
-        # for this, the flag must be explicitly passed to the `rustdoc` binary.
-        args.rustc_flags.add(toolchain.sysroot_short_path, format = "--sysroot=${{pwd}}/%s")
 
     return struct(
         executable = ctx.executable._process_wrapper,
@@ -321,6 +320,9 @@ rust_doc = rule(
             cfg = "exec",
             executable = True,
         ),
+        "_error_format": attr.label(
+            default = Label("//:error_format"),
+        ),
         "_process_wrapper": attr.label(
             doc = "A process wrapper for running rustdoc on all platforms",
             default = Label("@rules_rust//util/process_wrapper"),
@@ -336,7 +338,6 @@ rust_doc = rule(
         ),
     },
     fragments = ["cpp"],
-    host_fragments = ["cpp"],
     outputs = {
         "rust_doc_zip": "%{name}.zip",
     },
@@ -344,5 +345,4 @@ rust_doc = rule(
         str(Label("//rust:toolchain_type")),
         "@bazel_tools//tools/cpp:toolchain_type",
     ],
-    incompatible_use_toolchain_transition = True,
 )

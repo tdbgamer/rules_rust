@@ -5,6 +5,7 @@
 
 # bazel
 /bazel-*
+/bzlmod/hello_world/bazel-*
 /examples/bazel-*
 /examples/cargo_manifest_dir/external_crate/bazel-*
 /examples/crate_universe/bazel-*
@@ -14,6 +15,7 @@
 /test/no_std/bazel-*
 /docs/bazel-*
 user.bazelrc
+MODULE.bazel.lock
 
 # rustfmt
 *.rs.bk

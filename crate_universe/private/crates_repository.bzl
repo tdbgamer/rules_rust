@@ -125,8 +125,8 @@ Given the following workspace structure:
 
 ```text
 [workspace]/
-    WORKSPACE
-    BUILD
+    WORKSPACE.bazel
+    BUILD.bazel
     Cargo.toml
     Cargo.Bazel.lock
     src/
@@ -183,7 +183,8 @@ that is called behind the scenes to update dependencies.
 | Any of [`true`, `1`, `yes`, `on`, `workspace`] | `cargo update --workspace` |
 | Any of [`full`, `eager`, `all`] | `cargo update` |
 | `package_name` | `cargo upgrade --package package_name` |
-| `package_name@1.2.3` | `cargo upgrade --package package_name --precise 1.2.3` |
+| `package_name@1.2.3` | `cargo upgrade --package package_name@1.2.3` |
+| `package_name@1.2.3=4.5.6` | `cargo upgrade --package package_name@1.2.3 --precise=4.5.6` |
 
 If the `crates_repository` is used multiple times in the same Bazel workspace (e.g. for multiple independent
 Rust workspaces), it may additionally be useful to use the `CARGO_BAZEL_REPIN_ONLY` environment variable, which
@@ -228,10 +229,7 @@ CARGO_BAZEL_REPIN=1 CARGO_BAZEL_REPIN_ONLY=crate_index bazel sync --only=crate_i
             default = True,
         ),
         "generate_target_compatible_with": attr.bool(
-            doc = (
-                "Whether to generate `target_compatible_with` annotations on the generated BUILD files.  This catches a `target_triple` " +
-                "being targeted that isn't declared in `supported_platform_triples."
-            ),
+            doc = "DEPRECATED: Moved to `render_config`.",
             default = True,
         ),
         "generator": attr.string(

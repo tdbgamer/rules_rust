@@ -1,9 +1,10 @@
 //! The cli entrypoint for the `generate` subcommand
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as AnyhowContext, Result};
+use cargo_lock::Lockfile;
 use clap::Parser;
 
 use crate::config::Config;
@@ -12,6 +13,7 @@ use crate::lockfile::{lock_context, write_lockfile};
 use crate::metadata::{load_metadata, Annotations, Cargo};
 use crate::rendering::{write_outputs, Renderer};
 use crate::splicing::SplicingManifest;
+use crate::utils::normalize_cargo_file_paths;
 
 /// Command line options for the `generate` subcommand
 #[derive(Parser, Debug)]
@@ -73,15 +75,14 @@ pub fn generate(opt: GenerateOptions) -> Result<()> {
             let context = Context::try_from_path(lockfile)?;
 
             // Render build files
-            let outputs = Renderer::new(
-                config.rendering,
-                config.supported_platform_triples,
-                config.generate_target_compatible_with,
-            )
-            .render(&context)?;
+            let outputs = Renderer::new(config.rendering, config.supported_platform_triples)
+                .render(&context)?;
+
+            // make file paths compatible with bazel labels
+            let normalized_outputs = normalize_cargo_file_paths(outputs, &opt.repository_dir);
 
             // Write the outputs to disk
-            write_outputs(outputs, &opt.repository_dir, opt.dry_run)?;
+            write_outputs(normalized_outputs, opt.dry_run)?;
 
             return Ok(());
         }
@@ -116,12 +117,14 @@ pub fn generate(opt: GenerateOptions) -> Result<()> {
     let outputs = Renderer::new(
         config.rendering.clone(),
         config.supported_platform_triples.clone(),
-        config.generate_target_compatible_with,
     )
     .render(&context)?;
 
-    // Write outputs
-    write_outputs(outputs, &opt.repository_dir, opt.dry_run)?;
+    // make file paths compatible with bazel labels
+    let normalized_outputs = normalize_cargo_file_paths(outputs, &opt.repository_dir);
+
+    // Write the outputs to disk
+    write_outputs(normalized_outputs, opt.dry_run)?;
 
     // Ensure Bazel lockfiles are written to disk so future generations can be short-circuited.
     if let Some(lockfile) = opt.lockfile {
@@ -133,8 +136,21 @@ pub fn generate(opt: GenerateOptions) -> Result<()> {
         write_lockfile(lock_content, &lockfile, opt.dry_run)?;
     }
 
-    // Write the updated Cargo.lock file
-    fs::write(&opt.cargo_lockfile, cargo_lockfile.to_string())
+    update_cargo_lockfile(&opt.cargo_lockfile, cargo_lockfile)?;
+
+    Ok(())
+}
+
+fn update_cargo_lockfile(path: &Path, cargo_lockfile: Lockfile) -> Result<()> {
+    let old_contents = fs::read_to_string(path).ok();
+    let new_contents = cargo_lockfile.to_string();
+
+    // Don't overwrite identical contents because timestamp changes may invalidate repo rules.
+    if old_contents.as_ref() == Some(&new_contents) {
+        return Ok(());
+    }
+
+    fs::write(path, new_contents)
         .context("Failed to write Cargo.lock file back to the workspace.")?;
 
     Ok(())
