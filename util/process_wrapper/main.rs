@@ -147,7 +147,7 @@ fn main() -> Result<(), ProcessWrapperError> {
         let metadata_emitted = &mut me;
         let result = process_output(
             &mut child_stderr,
-            stderr.as_mut(),
+            &mut tee_file,
             output_file.as_mut(),
             move |line| {
                 if quit_on_rmeta {
@@ -168,7 +168,7 @@ fn main() -> Result<(), ProcessWrapperError> {
         // Process output normally by forwarding stderr
         process_output(
             &mut child_stderr,
-            stderr.as_mut(),
+            &mut tee_file,
             output_file.as_mut(),
             move |line| Ok(LineOutput::Message(line)),
         )

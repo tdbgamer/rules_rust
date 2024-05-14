@@ -67,6 +67,7 @@ def copy_crate_info(
         rustc_env = None,
         rustc_env_original = None,
         rustc_env_files = None,
+        rustc_output = None,
         srcs = None,
         type = None,
         wrapped_crate_type = None):
@@ -87,6 +88,7 @@ def copy_crate_info(
         rustc_env = rustc_env if rustc_env != None else crate_info.rustc_env,
         rustc_env_original = rustc_env_original if rustc_env_original != None else crate_info.rustc_env_original,
         rustc_env_files = rustc_env_files if rustc_env_files != None else crate_info.rustc_env_files,
+        rustc_output = rustc_output if rustc_output != None else crate_info.rustc_output,
         srcs = srcs if srcs != None else crate_info.srcs,
         type = type if type != None else crate_info.type,
         wrapped_crate_type = wrapped_crate_type if wrapped_crate_type != None else crate_info.wrapped_crate_type,
