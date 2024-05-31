@@ -50,14 +50,17 @@ def rust_wasm_bindgen_action(ctx, toolchain, wasm_file, target_output, bindgen_f
             wasm_file,
         ))
 
-    bindgen_wasm_module = ctx.actions.declare_file(ctx.label.name + "_bg.wasm")
+    bindgen_wasm_module = ctx.actions.declare_file("{0}/{0}_bg.wasm".format(ctx.label.name))
 
-    js_out = [ctx.actions.declare_file(ctx.label.name + ".js")]
-    ts_out = [ctx.actions.declare_file(ctx.label.name + ".d.ts")]
+    js_out = [ctx.actions.declare_file("{0}/{0}.js".format(ctx.label.name))]
+    ts_out = [ctx.actions.declare_file("{0}/{0}.d.ts".format(ctx.label.name))]
+
+    if ctx.attr.target == "web" or ctx.attr.target == "bundler":
+        js_out.append(ctx.actions.declare_directory("{0}/snippets".format(ctx.label.name)))
 
     if target_output == "bundler":
-        js_out.append(ctx.actions.declare_file(ctx.label.name + "_bg.js"))
-        ts_out.append(ctx.actions.declare_file(ctx.label.name + "_bg.wasm.d.ts"))
+        js_out.append(ctx.actions.declare_file("{0}/{0}_bg.js".format(ctx.label.name)))
+        ts_out.append(ctx.actions.declare_file("{0}/{0}_bg.wasm.d.ts".format(ctx.label.name)))
 
     outputs = [bindgen_wasm_module] + js_out + ts_out
 
