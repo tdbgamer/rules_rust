@@ -332,7 +332,7 @@ def _rust_test_impl(ctx):
         rustc_env_files = ctx.files.rustc_env_files + crate.rustc_env_files
 
         # crate.rustc_env is already expanded upstream in rust_library rule implementation
-        rustc_env = dict(crate.rustc_env)
+        rustc_env = dict(crate.rustc_env_original)
         data_paths = depset(direct = getattr(ctx.attr, "data", [])).to_list()
         rustc_env.update(expand_dict_value_locations(
             ctx,

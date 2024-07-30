@@ -23,7 +23,7 @@ load(
     "CPP_LINK_STATIC_LIBRARY_ACTION_NAME",
 )
 load("//rust/private:common.bzl", "rust_common")
-load("//rust/private:providers.bzl", "RustcOutputDiagnosticsInfo", _BuildInfo = "BuildInfo")
+load("//rust/private:providers.bzl", "RustcOutputDiagnosticsInfo", _BuildInfo = "BuildInfo", "copy_crate_info")
 load("//rust/private:stamp.bzl", "is_stamping_enabled")
 load(
     "//rust/private:utils.bzl",
@@ -1027,7 +1027,7 @@ def construct_arguments(
     use_metadata = _depend_on_metadata(crate_info, force_depend_on_objects)
 
     # These always need to be added, even if not linking this crate.
-    add_crate_link_flags(rustc_flags, dep_info, force_all_deps_direct, use_metadata)
+    add_crate_link_flags(rustc_flags, dep_info, crate_info, force_all_deps_direct, use_metadata, toolchain.target_os == "windows")
 
     needs_extern_proc_macro_flag = _is_proc_macro(crate_info) and crate_info.edition != "2015"
     if needs_extern_proc_macro_flag:
@@ -1193,6 +1193,10 @@ def rustc_compile_action(
         experimental_use_cc_common_link = experimental_use_cc_common_link,
     )
 
+    if toolchain.target_os == "windows":
+        symlink_deps = windows_symlink_transitive_deps(ctx, crate_info, dep_info)
+        compile_inputs = depset(symlink_deps, transitive = [compile_inputs])
+
     # The types of rustc outputs to emit.
     # If we build metadata, we need to keep the command line of the two invocations
     # (rlib and rmeta) as similar as possible, otherwise rustc rejects the rmeta as
@@ -1261,6 +1265,10 @@ def rustc_compile_action(
 
     # this is the final list of env vars
     env.update(env_from_args)
+
+    # print("Build")
+    # print("Crate Name = {}".format(crate_info.name))
+    # print("Crate Env = {}".format(env))
 
     if hasattr(attr, "version") and attr.version != "0.0.0":
         formatted_version = " v{}".format(attr.version)
@@ -1506,6 +1514,8 @@ def rustc_compile_action(
             "rustc_env": env,
         })
         crate_info = rust_common.create_crate_info(**crate_info_dict)
+    crate_info = copy_crate_info(crate_info, rustc_env = env)
+    # print("actual: {}".format(crate_info.actual))
 
     if crate_info.type in ["staticlib", "cdylib"]:
         # These rules are not supposed to be depended on by other rust targets, and
@@ -1536,6 +1546,7 @@ def rustc_compile_action(
     if output_group_info:
         providers.append(OutputGroupInfo(**output_group_info))
 
+    # print("BEFORE RETURN PROVIDERS: ", crate_info)
     return providers
 
 def _is_no_std(ctx, toolchain, crate_info):
@@ -1797,15 +1808,41 @@ def _get_dir_names(files):
         dirs[f.dirname] = None
     return dirs.keys()
 
-def add_crate_link_flags(args, dep_info, force_all_deps_direct = False, use_metadata = False):
+def windows_symlink_transitive_deps(ctx, crate_info, dep_info):
+    """Symlinks in transitive dependencies to fix rustc bug on Windows: https://github.com/rust-lang/rust/issues/79923
+
+    Args:
+        ctx (ctx): The source rule's context object
+        crate_info (CrateInfo): A CrateInfo provider
+        dep_info (DepInfo): The current target's dependency info
+
+    Returns:
+        list: A list of all symlinked transitive dependencies
+    """
+    symlink_deps = []
+    for dep in (dep_info.direct_crates.to_list() + dep_info.transitive_crates.to_list()):
+        if hasattr(dep, "dep"):
+            dep = dep.dep
+
+        symlink_dir = ctx.actions.declare_file("rlib_sym/" + dep.output.basename, sibling = crate_info.output)
+        ctx.actions.symlink(
+            output = symlink_dir,
+            target_file = dep.output,
+        )
+        symlink_deps.append(symlink_dir)
+    return symlink_deps
+
+def add_crate_link_flags(args, dep_info, crate_info, force_all_deps_direct = False, use_metadata = False, for_windows = False):
     """Adds link flags to an Args object reference
 
     Args:
         args (Args): An arguments object reference
         dep_info (DepInfo): The current target's dependency info
+        crate_info (CrateInfo): A CrateInfo provider
         force_all_deps_direct (bool, optional): Whether to pass the transitive rlibs with --extern
             to the commandline as opposed to -L.
         use_metadata (bool, optional): Build command line arugments using metadata for crates that provide it.
+        for_windows (bool, optional): Whether to add the rlib_sym directory to the linker search path.
     """
 
     direct_crates = depset(
@@ -1818,12 +1855,17 @@ def add_crate_link_flags(args, dep_info, force_all_deps_direct = False, use_meta
     crate_to_link_flags = _crate_to_link_flag_metadata if use_metadata else _crate_to_link_flag
     args.add_all(direct_crates, uniquify = True, map_each = crate_to_link_flags)
 
-    args.add_all(
-        dep_info.transitive_crates,
-        map_each = _get_crate_dirname,
-        uniquify = True,
-        format_each = "-Ldependency=%s",
-    )
+    if for_windows:
+        args.add(
+            "-Ldependency={}".format(crate_info.output.dirname + "/rlib_sym"),
+        )
+    else:
+        args.add_all(
+            dep_info.transitive_crates,
+            map_each = _get_crate_dirname,
+            uniquify = True,
+            format_each = "-Ldependency=%s",
+        )
 
 def _crate_to_link_flag_metadata(crate):
     """A helper macro used by `add_crate_link_flags` for adding crate link flags to a Arg object

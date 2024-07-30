@@ -20,7 +20,7 @@ mod util;
 
 use std::fmt;
 use std::fs::{copy, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::process::{exit, Command, ExitStatus, Stdio};
 
 use crate::options::options;
@@ -61,6 +61,31 @@ impl fmt::Display for ProcessWrapperError {
 
 impl std::error::Error for ProcessWrapperError {}
 
+struct TeeFile {
+    data: Vec<u8>,
+    file: Box<dyn io::Write>,
+}
+
+impl TeeFile {
+    fn new(file: Box<dyn io::Write>) -> Self {
+        Self {
+            data: Vec::new(),
+            file: file,
+        }
+    }
+}
+
+impl io::Write for TeeFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.data.extend_from_slice(buf);
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
 fn main() -> Result<(), ProcessWrapperError> {
     let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
 
@@ -83,17 +108,17 @@ fn main() -> Result<(), ProcessWrapperError> {
         .spawn()
         .map_err(|e| ProcessWrapperError(format!("failed to spawn child process: {}", e)))?;
 
-    let mut stderr: Box<dyn io::Write> = if let Some(stderr_file) = opts.stderr_file {
-        Box::new(
+    let mut tee_file: TeeFile = if let Some(stderr_file) = opts.stderr_file {
+        TeeFile::new(Box::new(
             OpenOptions::new()
                 .create(true)
                 .truncate(true)
                 .write(true)
                 .open(stderr_file)
                 .map_err(|e| ProcessWrapperError(format!("unable to open stderr file: {}", e)))?,
-        )
+        ))
     } else {
-        Box::new(io::stderr())
+        TeeFile::new(Box::new(io::stderr()))
     };
 
     let mut child_stderr = child.stderr.take().ok_or(ProcessWrapperError(
@@ -122,7 +147,7 @@ fn main() -> Result<(), ProcessWrapperError> {
         let metadata_emitted = &mut me;
         let result = process_output(
             &mut child_stderr,
-            stderr.as_mut(),
+            &mut tee_file,
             output_file.as_mut(),
             move |line| {
                 if quit_on_rmeta {
@@ -143,7 +168,7 @@ fn main() -> Result<(), ProcessWrapperError> {
         // Process output normally by forwarding stderr
         process_output(
             &mut child_stderr,
-            stderr.as_mut(),
+            &mut tee_file,
             output_file.as_mut(),
             move |line| Ok(LineOutput::Message(line)),
         )
@@ -158,12 +183,14 @@ fn main() -> Result<(), ProcessWrapperError> {
     let success = code == 0;
     if success {
         if let Some(tf) = opts.touch_file {
-            OpenOptions::new()
+            let mut f = OpenOptions::new()
                 .create(true)
                 .truncate(true)
                 .write(true)
                 .open(tf)
                 .map_err(|e| ProcessWrapperError(format!("failed to create touch file: {}", e)))?;
+            f.write_all(tee_file.data.as_slice())
+                .expect("process wrapper error: failed to write to touch file")
         }
         if let Some((copy_source, copy_dest)) = opts.copy_output {
             copy(&copy_source, &copy_dest).map_err(|e| {

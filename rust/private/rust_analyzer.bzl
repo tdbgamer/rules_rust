@@ -139,7 +139,7 @@ def _rust_analyzer_aspect_impl(target, ctx):
         aliases = aliases,
         crate = crate_info,
         cfgs = cfgs,
-        env = crate_info.rustc_env,
+        env = getattr(ctx.rule.attr, "rustc_env", {}) | getattr(crate_info, "rustc_env", {}),
         deps = dep_infos,
         crate_specs = depset(transitive = [dep.crate_specs for dep in dep_infos]),
         proc_macro_dylib_path = find_proc_macro_dylib_path(toolchain, target),
@@ -222,7 +222,7 @@ def _create_single_crate(ctx, attrs, info):
     # TODO: Some folks may want to override this for vendored dependencies.
     is_external = info.crate.root.path.startswith("external/")
     is_generated = not info.crate.root.is_source
-    path_prefix = _EXEC_ROOT_TEMPLATE if is_external or is_generated else ""
+    path_prefix = _OUTPUT_BASE_TEMPLATE if is_external or is_generated else ""
     crate["is_workspace_member"] = not is_external
     crate["root_module"] = path_prefix + info.crate.root.path
     crate["source"] = {"exclude_dirs": [], "include_dirs": []}
